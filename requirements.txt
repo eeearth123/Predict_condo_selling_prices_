@@ -7,4 +7,5 @@ xgboost
 lightgbm
 category-encoders
 flaml
+catboost
 
