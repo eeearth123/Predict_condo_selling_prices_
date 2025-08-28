@@ -1,0 +1,137 @@
+# streamlit_app.py (อัปเดตใหม่)
+import os, math, json, sys
+import joblib
+import pandas as pd
+import numpy as np
+import streamlit as st
+from locations_th import PROV_TO_DIST, DIST_TO_SUB, SUB_TO_STREET, STREET_TO_ZONE
+
+# ---------- Setup ----------
+st.set_page_config(page_title="Condo Price Predictor", page_icon="🏢", layout="wide")
+
+NUM_FEATURES = [
+    "Area_sqm", "Project_Age_notreal", "Floors", "Total_Units",
+    "Launch_Month_sin", "Launch_Month_cos",
+    "is_pool_access", "is_corner", "is_high_ceiling"
+]
+CAT_FEATURES = [
+    "Room_Type_Base", "Province", "District", "Subdistrict", "Street", "Zone"
+]
+ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
+PIPELINE_FILE = "pipeline.pkl"
+
+# ---------- Helpers ----------
+def month_to_sin_cos(m: int):
+    rad = 2 * math.pi * (m - 1) / 12.0
+    return math.sin(rad), math.cos(rad)
+
+def safe_float(x, default=0.0):
+    try: return float(x)
+    except: return float(default)
+
+# ---------- โหลดโมเดล ----------
+try:
+    import two_segment
+    sys.modules['main'] = two_segment
+except Exception:
+    pass
+
+if not os.path.exists(PIPELINE_FILE):
+    st.error(f"ไม่พบไฟล์ {PIPELINE_FILE} — กรุณาวางไฟล์โมเดลไว้โฟลเดอร์เดียวกับสคริปต์")
+    st.stop()
+
+try:
+    pipeline = joblib.load(PIPELINE_FILE)
+    st.sidebar.success("โหลด pipeline.pkl สำเร็จ ✅")
+except Exception as e:
+    st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
+    st.stop()
+
+# ---------- UI ----------
+st.title("🏢 Condo Price Predictor")
+st.caption("กรอกข้อมูล → ทำนายราคาขาย (ล้านบาท) และราคาต่อตรางเมตร")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    area = st.number_input("Area_sqm", min_value=10.0, max_value=1000.0, value=30.0)
+    floors = st.number_input("Floors", min_value=1, max_value=100, value=8)
+    
+
+with col2:
+    age = st.number_input("Project_Age_notreal", min_value=0.0, max_value=80.0, value=0.0)
+    total_units = st.number_input("Total_Units", min_value=10, max_value=10000, value=300)
+    
+
+with col3:
+    month = st.selectbox("Launch Month", options=list(range(1,13)), index=0)
+    
+m_sin, m_cos = month_to_sin_cos(month)
+
+# จังหวัด → อำเภอ → ตำบล
+province = st.selectbox("Province", options=sorted(PROV_TO_DIST))
+district = st.selectbox("District", options=PROV_TO_DIST.get(province, []))
+subdistrict = st.selectbox("Subdistrict", options=DIST_TO_SUB.get(district, []))
+street = st.selectbox("Street", options=SUB_TO_STREET.get(subdistrict, []))
+zone = STREET_TO_ZONE.get(street, "")
+st.text_input("Zone (auto)", value=zone, disabled=True)
+
+room_type_base = st.selectbox(
+    "Room_Type_Base", 
+    options = [
+    'STUDIO', '2BED', '3BED', '1BED', '1BED_PLUS', 'PENTHOUSE', '2BED_DUPLEX',
+    '1BED_DUPLEX', 'DUPLEX_OTHER', '4BED', 'POOL_VILLA', '4BED_PENTHOUSE',
+    '3BED_DUPLEX', '1BED_LOFT', '3BED_TRIPLEX', '3BED_PENTHOUSE', '4BED_DUPLEX',
+    '5BED_DUPLEX', '2BED_PLUS', 'PENTHOUSE_DUPLEX',
+    'Pool Access(เชื่อมสระว่ายน้ำ)', '5BED', 'MOFF-Design', '25BED', 'LOFT_OTHER',
+    '2BED_PENTHOUSE', 'SHOP', '1BED_PLUS_LOFT', '2BED_LOFT', 'Stuio',
+    'Stuio  vertiplex', '3BED_PLUS', '3BED_PLUS_DUPLEX', '3BED_LOFT', '4BED_LOFT',
+    'DUO', '1BED_TRIPLEX', '1BED_PLUS_TRIPLEX', '2BED_TRIPLEX', 'Simplex'
+]
+
+)
+
+# ---------- ย้ายกลุ่ม checkbox มาไว้ล่าง ----------
+st.subheader("ลักษณะห้องเพิ่มเติม")
+is_pool_access = st.checkbox("Pool Access (เชื่อมสระว่ายน้ำ)")
+is_corner = st.checkbox("ห้องมุม (Corner Room)")
+is_high_ceiling = st.checkbox("เพดานสูง (High Ceiling)")
+
+# ---------- DataFrame ----------
+row = {
+    "Area_sqm": area,
+    "Project_Age_notreal": age,
+    "Floors": floors,
+    "Total_Units": total_units,
+    "Launch_Month_sin": m_sin,
+    "Launch_Month_cos": m_cos,
+    "Province": province,
+    "District": district,
+    "Subdistrict": subdistrict,
+    "Street": street,
+    "Zone": zone,
+    "Room_Type_Base": room_type_base,
+    "is_pool_access": int(is_pool_access),
+    "is_corner": int(is_corner),
+    "is_high_ceiling": int(is_high_ceiling),
+
+}
+
+X = pd.DataFrame([row], columns=ALL_FEATURES)
+
+with st.expander("ดูข้อมูล (X)"):
+    st.dataframe(X, use_container_width=True)
+
+st.divider()
+
+# ---------- Predict ----------
+if st.button("Predict Price (ล้านบาท)"):
+    try:
+        y_pred = pipeline.predict(X)
+        price_million = float(np.ravel(y_pred)[0])
+        st.metric("Predicted Price (ล้านบาท)", f"{price_million:.3f}")
+
+        price_per_sqm = (price_million * 1_000_000.0) / max(1.0, safe_float(area))
+        st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
+    except Exception as e:
+        st.error(f"Prediction failed: {e}")
+        st.code(json.dumps(row, ensure_ascii=False, indent=2))
