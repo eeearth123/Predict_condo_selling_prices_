@@ -58,7 +58,7 @@ with col1:
     
 
 with col2:
-    age = st.number_input("Project_Age_notreal", min_value=0.0, max_value=80.0, value=0.0)
+    age = st.number_input("Project_Age", min_value=0.0, max_value=80.0, value=0.0)
     total_units = st.number_input("Total_Units", min_value=10, max_value=10000, value=300)
     
 
@@ -135,3 +135,4 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
