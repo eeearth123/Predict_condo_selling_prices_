@@ -67,7 +67,7 @@ except:
     
 
 with col2:
-    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age_notreal", value="0")
+    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age", value="0")
 try:
     age = float(age_input)
 except:
@@ -155,6 +155,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
