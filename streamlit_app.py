@@ -83,7 +83,7 @@ except:
     
 
 with col3:
-    month = st.selectbox("Launch Month", options=list(range(1,13)), index=0)
+    month = st.selectbox("เดือนเปิดตัว - Launch Month", options=list(range(1,13)), index=0)
     
 m_sin, m_cos = month_to_sin_cos(month)
 
@@ -155,6 +155,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
