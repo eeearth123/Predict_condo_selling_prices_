@@ -58,7 +58,6 @@ try:
     area = float(area_input)
 except:
     area = 0.0  # หรือค่า default อื่น ๆ
-
     floors = st.number_input("Floors", min_value=1, max_value=100, value=8)
     
 
@@ -145,5 +144,6 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
