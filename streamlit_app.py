@@ -28,6 +28,21 @@ def month_to_sin_cos(m: int):
 def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
+from sklearn.metrics.pairwise import euclidean_distances
+
+def compute_confidence(X_train, X_input, k=5):
+    if X_train is None:
+        return None
+    try:
+        distances = euclidean_distances(X_train, X_input)
+        topk_distances = np.sort(distances, axis=0)[:k]
+        avg_distance = np.mean(topk_distances)
+        max_d = np.max(distances)
+        score = 1.0 - (avg_distance / max_d)
+        return max(0.0, min(1.0, score))  # ค่าระหว่าง 0-1
+    except:
+        return None
+
 
 # ---------- โหลดโมเดล ----------
 try:
@@ -46,6 +61,12 @@ try:
 except Exception as e:
     st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
     st.stop()
+# ---------- โหลด X_train (สำหรับใช้คำนวณ Confidence) ----------
+try:
+    X_train_all = joblib.load("X_train.pkl")  # ต้องมีไฟล์นี้ในโฟลเดอร์เดียวกับ pipeline.pkl
+except Exception as e:
+    st.warning("⚠️ ไม่พบไฟล์ X_train.pkl — จะไม่แสดง Confidence Score")
+    X_train_all = None
 
 # ---------- UI ----------
 st.title("🏢 Condo Price Predictor")
@@ -156,6 +177,15 @@ if st.button("Predict Price (ล้านบาท)"):
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
 
+# คำนวณและแสดง Confidence
+if X_train_all is not None:
+    try:
+        X_train_used = X_train_all[ALL_FEATURES].copy()
+        confidence = compute_confidence(X_train_used, X[ALL_FEATURES])
+        if confidence is not None:
+            st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+    except Exception as e:
+        st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
 
 
 
