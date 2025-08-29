@@ -88,15 +88,15 @@ with col3:
 m_sin, m_cos = month_to_sin_cos(month)
 
 # จังหวัด → อำเภอ → ตำบล
-province = st.selectbox("Province", options=sorted(PROV_TO_DIST))
-district = st.selectbox("District", options=PROV_TO_DIST.get(province, []))
-subdistrict = st.selectbox("Subdistrict", options=DIST_TO_SUB.get(district, []))
-street = st.selectbox("Street", options=SUB_TO_STREET.get(subdistrict, []))
+province = st.selectbox("จังหวัด - Province", options=sorted(PROV_TO_DIST))
+district = st.selectbox("เขต(อำเภอ) - District", options=PROV_TO_DIST.get(province, []))
+subdistrict = st.selectbox("แขวง(ตำบล) - Subdistrict", options=DIST_TO_SUB.get(district, []))
+street = st.selectbox("ถนน - Street", options=SUB_TO_STREET.get(subdistrict, []))
 zone = STREET_TO_ZONE.get(street, "")
 st.text_input("Zone (auto)", value=zone, disabled=True)
 
 room_type_base = st.selectbox(
-    "Room_Type_Base", 
+    "ประเภทห้อง - Room_Type", 
     options = [
     'STUDIO', '2BED', '3BED', '1BED', '1BED_PLUS', 'PENTHOUSE', '2BED_DUPLEX',
     '1BED_DUPLEX', 'DUPLEX_OTHER', '4BED', 'POOL_VILLA', '4BED_PENTHOUSE',
@@ -112,9 +112,9 @@ room_type_base = st.selectbox(
 
 # ---------- ย้ายกลุ่ม checkbox มาไว้ล่าง ----------
 st.subheader("ลักษณะห้องเพิ่มเติม")
-is_pool_access = st.checkbox("Pool Access (เชื่อมสระว่ายน้ำ)")
+is_pool_access = st.checkbox("ห้องเชื่อมสระว่ายน้ำ (Pool Access)")
 is_corner = st.checkbox("ห้องมุม (Corner Room)")
-is_high_ceiling = st.checkbox("เพดานสูง (High Ceiling)")
+is_high_ceiling = st.checkbox("ห้องเพดานสูง (High Ceiling)")
 
 # ---------- DataFrame ----------
 row = {
@@ -155,6 +155,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
