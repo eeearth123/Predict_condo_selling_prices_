@@ -103,7 +103,7 @@ room_type_base = st.selectbox(
     '3BED_DUPLEX', '1BED_LOFT', '3BED_TRIPLEX', '3BED_PENTHOUSE', '4BED_DUPLEX',
     '5BED_DUPLEX', '2BED_PLUS', 'PENTHOUSE_DUPLEX',
     'Pool Access(เชื่อมสระว่ายน้ำ)', '5BED', 'MOFF-Design', '25BED', 'LOFT_OTHER',
-    '2BED_PENTHOUSE', 'SHOP', '1BED_PLUS_LOFT', '2BED_LOFT', 'Stuio',
+    '2BED_PENTHOUSE', 'SHOP', '1BED_PLUS_LOFT', '2BED_LOFT',
     'Stuio  vertiplex', '3BED_PLUS', '3BED_PLUS_DUPLEX', '3BED_LOFT', '4BED_LOFT',
     'DUO', '1BED_TRIPLEX', '1BED_PLUS_TRIPLEX', '2BED_TRIPLEX', 'Simplex'
 ]
@@ -155,6 +155,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
