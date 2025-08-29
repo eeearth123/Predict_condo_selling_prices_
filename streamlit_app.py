@@ -53,12 +53,22 @@ st.caption("กรอกข้อมูล → ทำนายราคาขา
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    area = st.number_input("Area_sqm", min_value=10.0, max_value=1000.0, value=30.0)
+    area_input = st.text_input("พื้นที่ (ตร.ม.) — Area_sqm", value="30")
+try:
+    area = float(area_input)
+except:
+    area = 0.0  # หรือค่า default อื่น ๆ
+
     floors = st.number_input("Floors", min_value=1, max_value=100, value=8)
     
 
 with col2:
-    age = st.number_input("Project_Age", min_value=0.0, max_value=80.0, value=0.0)
+    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age_notreal", value="0")
+try:
+    age = float(age_input)
+except:
+    st.warning("กรุณาใส่อายุโครงการ เช่น 2.5")
+    age = 0.0
     total_units = st.number_input("Total_Units", min_value=10, max_value=10000, value=300)
     
 
@@ -135,4 +145,5 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
