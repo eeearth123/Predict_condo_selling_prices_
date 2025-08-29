@@ -58,7 +58,7 @@ try:
     area = float(area_input)
 except:
     area = 0.0  # หรือค่า default อื่น ๆ
-    floors_input = st.text_input("ชั้นอาคาร — Floors", value="8")
+floors_input = st.text_input("ชั้นอาคาร — Floors", value="8")
 try:
     floors = int(floors_input)
 except:
@@ -73,7 +73,7 @@ try:
 except:
     st.warning("กรุณาใส่อายุโครงการ เช่น 2.5")
     age = 0.0
-    total_units_input = st.text_input("จำนวนยูนิตทั้งหมด — Total_Units", value="300")
+total_units_input = st.text_input("จำนวนยูนิตทั้งหมด — Total_Units", value="300")
 try:
     total_units = int(total_units_input)
 except:
@@ -155,6 +155,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
