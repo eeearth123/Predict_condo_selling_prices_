@@ -58,7 +58,12 @@ try:
     area = float(area_input)
 except:
     area = 0.0  # หรือค่า default อื่น ๆ
-    floors = st.number_input("Floors", min_value=1, max_value=100, value=8)
+floors_input = st.text_input("ชั้นอาคาร — Floors", value="8")
+try:
+    floors = int(floors_input)
+except:
+    st.warning("กรุณาใส่จำนวนชั้น เช่น 5")
+    floors = 1  # ค่า fallback
     
 
 with col2:
@@ -144,6 +149,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
+
 
 
 
