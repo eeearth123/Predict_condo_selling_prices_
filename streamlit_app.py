@@ -30,19 +30,14 @@ def safe_float(x, default=0.0):
     except: return float(default)
 from sklearn.metrics.pairwise import euclidean_distances
 
-def compute_confidence(X_train, X_input, k=5):
-    if X_train is None:
-        return None
+def compute_confidence(X_train, X_new):
+    """ใช้ cosine similarity กับข้อมูลเทรน เพื่อประเมินความมั่นใจ"""
     try:
-        distances = euclidean_distances(X_train, X_input)
-        topk_distances = np.sort(distances, axis=0)[:k]
-        avg_distance = np.mean(topk_distances)
-        max_d = np.max(distances)
-        score = 1.0 - (avg_distance / max_d)
-        return max(0.0, min(1.0, score))  # ค่าระหว่าง 0-1
-    except:
+        sim = cosine_similarity(X_train, X_new)
+        max_sim = float(np.max(sim))
+        return max_sim
+    except Exception as e:
         return None
-
 
 # ---------- โหลดโมเดล ----------
 try:
@@ -183,6 +178,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
