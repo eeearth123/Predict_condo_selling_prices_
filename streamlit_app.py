@@ -176,9 +176,7 @@ if st.button("Predict Price (ล้านบาท)"):
     except Exception as e:
         st.error(f"Prediction failed: {e}")
         st.code(json.dumps(row, ensure_ascii=False, indent=2))
-
-# คำนวณและแสดง Confidence
-if X_train_all is not None:
+        if X_train_all is not None:
     try:
         X_train_used = X_train_all[ALL_FEATURES].copy()
         confidence = compute_confidence(X_train_used, X[ALL_FEATURES])
@@ -186,6 +184,7 @@ if X_train_all is not None:
             st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
     except Exception as e:
         st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+
 
 
 
