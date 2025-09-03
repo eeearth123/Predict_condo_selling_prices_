@@ -170,12 +170,14 @@ if st.button("Predict Price (ล้านบาท)"):
 
         # ✅ Confidence Score
         if X_train_all is not None:
-            confidence = compute_confidence_from_pipeline(pipeline, X, X_train_all)
+            confidence = compute_confidence(X_train_used, X[ALL_FEATURES])
             if confidence is not None:
                 st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
 
+
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
