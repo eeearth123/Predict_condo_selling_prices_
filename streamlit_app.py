@@ -28,16 +28,16 @@ def month_to_sin_cos(m: int):
 def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
-from sklearn.metrics.pairwise import euclidean_distances
+
 
 def compute_confidence(X_train, X_new):
-    """ใช้ cosine similarity กับข้อมูลเทรน เพื่อประเมินความมั่นใจ"""
     try:
         sim = cosine_similarity(X_train, X_new)
         max_sim = float(np.max(sim))
         return max_sim
     except Exception as e:
         return None
+
 
 # ---------- โหลดโมเดล ----------
 try:
@@ -178,6 +178,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
