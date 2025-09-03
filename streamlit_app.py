@@ -184,11 +184,19 @@ if st.button("Predict Price (ล้านบาท)"):
 
                 if confidence is not None:
                     st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+                    if confidence >= 0.9:
+                        st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
+                    elif confidence >= 0.7:
+                        st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
+                    else:
+                        st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
+
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
