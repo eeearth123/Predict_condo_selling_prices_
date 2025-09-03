@@ -168,6 +168,9 @@ if st.button("Predict Price (ล้านบาท)"):
         pred_val = float(np.ravel(y_pred)[0])
         st.metric("ราคาคาดการณ์ (ล้านบาท)", f"{pred_val:.3f}")
 
+        price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
+        st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
+
         # ✅ ลองคำนวณ Confidence Score ถ้ามีข้อมูลเทรน
         if X_train_all is not None:
             try:
@@ -196,6 +199,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
