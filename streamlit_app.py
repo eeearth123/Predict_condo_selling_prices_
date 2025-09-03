@@ -30,19 +30,31 @@ def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
 
-def compute_confidence_from_pipeline(pipeline, X_train_df, X_input):
-    from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity
+
+def compute_confidence_from_pipeline(pipeline, X_input, X_train_all):
     try:
-        X_train_encoded = pipeline.mass_encoder.transform(X_train_df[pipeline.cat_cols])
-        X_input_encoded = pipeline.mass_encoder.transform(X_input[pipeline.cat_cols])
+        # เลือก encoder ตาม area
+        use_lux = X_input["Area_sqm"].iloc[0] > pipeline.threshold
+        encoder = pipeline.lux_encoder if use_lux else pipeline.mass_encoder
 
-        X_train_final = pd.concat([X_train_df[pipeline.selected_features].drop(columns=pipeline.cat_cols), X_train_encoded], axis=1)
-        X_input_final = pd.concat([X_input[pipeline.selected_features].drop(columns=pipeline.cat_cols), X_input_encoded], axis=1)
+        # แปลง cat cols
+        X_train_enc = X_train_all[pipeline.selected_features].copy()
+        X_input_enc = X_input[pipeline.selected_features].copy()
+        
+        if pipeline.cat_cols:
+            encoder.fit(X_train_enc[pipeline.cat_cols], [0]*len(X_train_enc))  # dummy target
+            X_train_enc[pipeline.cat_cols] = encoder.transform(X_train_enc[pipeline.cat_cols])
+            X_input_enc[pipeline.cat_cols] = encoder.transform(X_input_enc[pipeline.cat_cols])
 
-        sim = cosine_similarity(X_train_final, X_input_final)
-        return float(np.max(sim))
+        # คำนวณ cosine similarity
+        sim = cosine_similarity(X_train_enc, X_input_enc)
+        confidence = float(np.max(sim))
+        return confidence
     except Exception as e:
+        st.warning(f"ไม่สามารถคำนวณ Confidence ได้: {e}")
         return None
+
 
 # ---------- Load model ----------
 try:
@@ -62,11 +74,13 @@ except Exception as e:
     st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
     st.stop()
 
-# ---------- Load training data ----------
+# ---------- โหลด X_train (สำหรับ Confidence) ----------
 try:
     X_train_all = joblib.load("X_train.pkl")
 except:
+    st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
     X_train_all = None
+
 
 # ---------- UI ----------
 st.title("🏢 Condo Price Predictor")
@@ -150,10 +164,12 @@ if st.button("Predict Price (ล้านบาท)"):
         pred_val = float(np.ravel(y_pred)[0])
         st.metric("ราคาคาดการณ์ (ล้านบาท)", f"{pred_val:.3f}")
 
+        # ✅ Confidence Score
         if X_train_all is not None:
-            confidence = compute_confidence_from_pipeline(pipeline, X_train_all, X)
+            confidence = compute_confidence_from_pipeline(pipeline, X, X_train_all)
             if confidence is not None:
                 st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
