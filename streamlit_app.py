@@ -97,7 +97,7 @@ with col1:
     except: floors = 1
 
 with col2:
-    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age_notreal", value="0")
+    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age", value="0")
     try: age = float(age_input)
     except: age = 0.0
 
@@ -116,7 +116,7 @@ street = st.selectbox("ถนน - Street", options=SUB_TO_STREET.get(subdistric
 zone = STREET_TO_ZONE.get(street, "")
 st.text_input("Zone (auto)", value=zone, disabled=True)
 
-room_type_base = st.selectbox("ประเภทห้อง — Room_Type_Base", options = [
+room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options = [
     'STUDIO', '2BED', '3BED', '1BED', '1BED_PLUS', 'PENTHOUSE', '2BED_DUPLEX',
     '1BED_DUPLEX', 'DUPLEX_OTHER', '4BED', 'POOL_VILLA', '4BED_PENTHOUSE',
     '3BED_DUPLEX', '1BED_LOFT', '3BED_TRIPLEX', '3BED_PENTHOUSE', '4BED_DUPLEX',
@@ -172,4 +172,5 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
