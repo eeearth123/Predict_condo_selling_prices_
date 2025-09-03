@@ -30,29 +30,33 @@ def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
 
+
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import StandardScaler
 
-def compute_confidence_from_pipeline(pipeline, X_input, X_train_all):
+def compute_confidence(X_train, X_new, top_k=5):
     try:
-        # เลือก encoder ตาม area
-        use_lux = X_input["Area_sqm"].iloc[0] > pipeline.threshold
-        encoder = pipeline.lux_encoder if use_lux else pipeline.mass_encoder
+        # รวมข้อมูลเพื่อ normalize พร้อมกัน
+        combined = pd.concat([X_train, X_new], axis=0)
 
-        # แปลง cat cols
-        X_train_enc = X_train_all[pipeline.selected_features].copy()
-        X_input_enc = X_input[pipeline.selected_features].copy()
-        
-        if pipeline.cat_cols:
-            encoder.fit(X_train_enc[pipeline.cat_cols], [0]*len(X_train_enc))  # dummy target
-            X_train_enc[pipeline.cat_cols] = encoder.transform(X_train_enc[pipeline.cat_cols])
-            X_input_enc[pipeline.cat_cols] = encoder.transform(X_input_enc[pipeline.cat_cols])
+        # Normalize (เฉพาะตัวเลข)
+        scaler = StandardScaler()
+        combined_scaled = scaler.fit_transform(combined)
+
+        X_train_scaled = combined_scaled[:-1]
+        X_new_scaled = combined_scaled[-1].reshape(1, -1)
 
         # คำนวณ cosine similarity
-        sim = cosine_similarity(X_train_enc, X_input_enc)
-        confidence = float(np.max(sim))
+        sim = cosine_similarity(X_train_scaled, X_new_scaled).ravel()  # shape = (n_train,)
+
+        # หาค่าเฉลี่ยของ top-k similarity
+        top_k = min(top_k, len(sim))  # กันกรณี train น้อย
+        top_scores = np.sort(sim)[-top_k:]
+        confidence = float(np.mean(top_scores))
+
         return confidence
+
     except Exception as e:
-        st.warning(f"ไม่สามารถคำนวณ Confidence ได้: {e}")
         return None
 
 
@@ -172,5 +176,6 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
