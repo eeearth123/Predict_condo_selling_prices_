@@ -168,15 +168,29 @@ if st.button("Predict Price (ล้านบาท)"):
         pred_val = float(np.ravel(y_pred)[0])
         st.metric("ราคาคาดการณ์ (ล้านบาท)", f"{pred_val:.3f}")
 
-        # ✅ Confidence Score
+        # ✅ ลองคำนวณ Confidence Score ถ้ามีข้อมูลเทรน
         if X_train_all is not None:
-            confidence = compute_confidence(X_train_used, X[ALL_FEATURES])
-            if confidence is not None:
-                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+            try:
+                # ✅ เตรียม X_train ที่ใช้ encoder เดียวกัน
+                X_train_used = X_train_all[ALL_FEATURES].copy()
+                if hasattr(pipeline, 'mass_encoder'):
+                    X_train_used[CAT_FEATURES] = pipeline.mass_encoder.transform(X_train_used[CAT_FEATURES])
+                    X_input = X[ALL_FEATURES].copy()
+                    X_input[CAT_FEATURES] = pipeline.mass_encoder.transform(X_input[CAT_FEATURES])
+                else:
+                    X_input = X[ALL_FEATURES].copy()
 
+                confidence = compute_confidence(X_train_used, X_input)
+
+                if confidence is not None:
+                    st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+            except Exception as e:
+                st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
