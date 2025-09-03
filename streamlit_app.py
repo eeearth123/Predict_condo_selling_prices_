@@ -1,11 +1,11 @@
-# streamlit_app.py (อัปเดตสมบูรณ์พร้อม Confidence)
+# streamlit_app.py (อัปเดตใหม่ พร้อมภาษาไทย+อังกฤษ)
 import os, math, json, sys
 import joblib
 import pandas as pd
 import numpy as np
 import streamlit as st
-from sklearn.metrics.pairwise import cosine_similarity
 from locations_th import PROV_TO_DIST, DIST_TO_SUB, SUB_TO_STREET, STREET_TO_ZONE
+from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- Setup ----------
 st.set_page_config(page_title="Condo Price Predictor", page_icon="🏢", layout="wide")
@@ -30,15 +30,21 @@ def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
 
-def compute_confidence(X_train, X_new):
+def compute_confidence_from_pipeline(pipeline, X_train_df, X_input):
+    from sklearn.metrics.pairwise import cosine_similarity
     try:
-        sim = cosine_similarity(X_train, X_new)
-        max_sim = float(np.max(sim))
-        return max_sim
-    except Exception:
+        X_train_encoded = pipeline.mass_encoder.transform(X_train_df[pipeline.cat_cols])
+        X_input_encoded = pipeline.mass_encoder.transform(X_input[pipeline.cat_cols])
+
+        X_train_final = pd.concat([X_train_df[pipeline.selected_features].drop(columns=pipeline.cat_cols), X_train_encoded], axis=1)
+        X_input_final = pd.concat([X_input[pipeline.selected_features].drop(columns=pipeline.cat_cols), X_input_encoded], axis=1)
+
+        sim = cosine_similarity(X_train_final, X_input_final)
+        return float(np.max(sim))
+    except Exception as e:
         return None
 
-# ---------- โหลดโมเดล ----------
+# ---------- Load model ----------
 try:
     import two_segment
     sys.modules['main'] = two_segment
@@ -46,69 +52,89 @@ except Exception:
     pass
 
 if not os.path.exists(PIPELINE_FILE):
-    st.error(f"ไม่พบไฟล์ {PIPELINE_FILE} — กรุณาวางไฟล์โมเดลไว้โฟลเดอร์เดียวกับสคริป")
+    st.error(f"ไม่พบไฟล์ {PIPELINE_FILE} — กรุณาวางไฟล์โมเดลไว้โฟลเดอร์เดียวกับสคริปต์")
     st.stop()
 
 try:
     pipeline = joblib.load(PIPELINE_FILE)
-    st.sidebar.success("โหลด pipeline.pkl สำเร็จแล้ว ✅")
+    st.sidebar.success("โหลด pipeline.pkl สำเร็จ ✅")
 except Exception as e:
     st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
     st.stop()
 
-# ---------- โหลด X_train (สำหรับใช้คำนวณ Confidence) ----------
+# ---------- Load training data ----------
 try:
     X_train_all = joblib.load("X_train.pkl")
-except Exception as e:
-    st.warning("⚠️ ไม่พบไฟล์ X_train.pkl — จะไม่แสดง Confidence Score")
+except:
     X_train_all = None
 
 # ---------- UI ----------
 st.title("🏢 Condo Price Predictor")
-st.caption("กรอกข้อมูล → ทำนายราคาขาย ( ล้านบาท )")
+st.caption("กรอกข้อมูล → ทำนายราคาขาย (ล้านบาท) และราคาต่อตารางเมตร (บาท/ตร.ม.)")
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    area = safe_float(st.text_input("พื้นที่ ( ตร. ม. )", value="30"))
-    floors = int(st.text_input("ชั้นอาคาร", value="8"))
+    area_input = st.text_input("พื้นที่ (ตร.ม.) — Area_sqm", value="30")
+    try: area = float(area_input)
+    except: area = 0.0
+
+    floors_input = st.text_input("ชั้นอาคาร — Floors", value="8")
+    try: floors = int(floors_input)
+    except: floors = 1
+
 with col2:
-    age = safe_float(st.text_input("อายุโครงการ ( ปี )", value="0"))
-    total_units = int(st.text_input("จำนวนยูนิต", value="300"))
+    age_input = st.text_input("อายุโครงการ (ปี) — Project_Age_notreal", value="0")
+    try: age = float(age_input)
+    except: age = 0.0
+
+    total_units_input = st.text_input("จำนวนยูนิตทั้งหมด — Total_Units", value="300")
+    try: total_units = int(total_units_input)
+    except: total_units = 100
+
 with col3:
-    month = st.selectbox("Launch Month", options=list(range(1,13)), index=0)
+    month = st.selectbox("เดือนเปิดตัว — Launch Month", options=list(range(1,13)), index=0)
+    m_sin, m_cos = month_to_sin_cos(month)
 
-m_sin, m_cos = month_to_sin_cos(month)
-
-province = st.selectbox("Province", sorted(PROV_TO_DIST))
-district = st.selectbox("District", PROV_TO_DIST.get(province, []))
-subdistrict = st.selectbox("Subdistrict", DIST_TO_SUB.get(district, []))
-street = st.selectbox("Street", SUB_TO_STREET.get(subdistrict, []))
+province = st.selectbox("จังหวัด - Province", options=sorted(PROV_TO_DIST))
+district = st.selectbox("เขต/อำเภอ - District", options=PROV_TO_DIST.get(province, []))
+subdistrict = st.selectbox("แขวง/ตำบล - Subdistrict", options=DIST_TO_SUB.get(district, []))
+street = st.selectbox("ถนน - Street", options=SUB_TO_STREET.get(subdistrict, []))
 zone = STREET_TO_ZONE.get(street, "")
 st.text_input("Zone (auto)", value=zone, disabled=True)
 
-room_type_base = st.selectbox("Room_Type_Base", options=[
+room_type_base = st.selectbox("ประเภทห้อง — Room_Type_Base", options = [
     'STUDIO', '2BED', '3BED', '1BED', '1BED_PLUS', 'PENTHOUSE', '2BED_DUPLEX',
     '1BED_DUPLEX', 'DUPLEX_OTHER', '4BED', 'POOL_VILLA', '4BED_PENTHOUSE',
     '3BED_DUPLEX', '1BED_LOFT', '3BED_TRIPLEX', '3BED_PENTHOUSE', '4BED_DUPLEX',
     '5BED_DUPLEX', '2BED_PLUS', 'PENTHOUSE_DUPLEX', 'Pool Access(เชื่อมสระว่ายน้ำ)',
     '5BED', 'MOFF-Design', '25BED', 'LOFT_OTHER', '2BED_PENTHOUSE', 'SHOP',
-    '1BED_PLUS_LOFT', '2BED_LOFT', 'Stuio  vertiplex', '3BED_PLUS',
-    '3BED_PLUS_DUPLEX', '3BED_LOFT', '4BED_LOFT', 'DUO', '1BED_TRIPLEX',
-    '1BED_PLUS_TRIPLEX', '2BED_TRIPLEX', 'Simplex'])
+    '1BED_PLUS_LOFT', '2BED_LOFT', 'Stuio vertiplex', '3BED_PLUS', '3BED_PLUS_DUPLEX',
+    '3BED_LOFT', '4BED_LOFT', 'DUO', '1BED_TRIPLEX', '1BED_PLUS_TRIPLEX',
+    '2BED_TRIPLEX', 'Simplex'])
 
-# ---------- Checkboxes ----------
-st.subheader("ลักษะห้องเพิ่มเติม")
-is_pool_access = st.checkbox("Pool Access")
-is_corner = st.checkbox("Corner Room")
-is_high_ceiling = st.checkbox("High Ceiling")
+# ---------- Extra Options ----------
+st.subheader("ลักษณะห้องเพิ่มเติม")
+is_pool_access = st.checkbox("ห้องเชื่อมสระว่ายน้ำ (Pool Access)")
+is_corner = st.checkbox("ห้องมุม (Corner Room)")
+is_high_ceiling = st.checkbox("ห้องเพดานสูง (High Ceiling)")
 
-# ---------- DataFrame ----------
+# ---------- Prepare Input ----------
 row = {
-    "Area_sqm": area, "Project_Age_notreal": age, "Floors": floors, "Total_Units": total_units,
-    "Launch_Month_sin": m_sin, "Launch_Month_cos": m_cos,
-    "Province": province, "District": district, "Subdistrict": subdistrict,
-    "Street": street, "Zone": zone, "Room_Type_Base": room_type_base,
-    "is_pool_access": int(is_pool_access), "is_corner": int(is_corner), "is_high_ceiling": int(is_high_ceiling)
+    "Area_sqm": area,
+    "Project_Age_notreal": age,
+    "Floors": floors,
+    "Total_Units": total_units,
+    "Launch_Month_sin": m_sin,
+    "Launch_Month_cos": m_cos,
+    "Province": province,
+    "District": district,
+    "Subdistrict": subdistrict,
+    "Street": street,
+    "Zone": zone,
+    "Room_Type_Base": room_type_base,
+    "is_pool_access": int(is_pool_access),
+    "is_corner": int(is_corner),
+    "is_high_ceiling": int(is_high_ceiling),
 }
 X = pd.DataFrame([row], columns=ALL_FEATURES)
 
@@ -125,13 +151,9 @@ if st.button("Predict Price (ล้านบาท)"):
         st.metric("ราคาคาดการณ์ (ล้านบาท)", f"{pred_val:.3f}")
 
         if X_train_all is not None:
-            try:
-                X_train_used = X_train_all[ALL_FEATURES].copy()
-                confidence = compute_confidence(X_train_used, X[ALL_FEATURES])
-                if confidence is not None:
-                    st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
-            except Exception as e:
-                st.warning(f"ไม่สามารคำนวณ confidence ได้: {e}")
+            confidence = compute_confidence_from_pipeline(pipeline, X_train_all, X)
+            if confidence is not None:
+                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
