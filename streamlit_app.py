@@ -59,9 +59,9 @@ def compute_confidence(X_train, X_new, top_k=5):
     except Exception as e:
         return None
 def flexible_selectbox(label, options):
-"""เลือกจาก list หรือพิมพ์เองได้ (return ค่าที่เลือก/พิม)"""
-extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
-choice = st.selectbox(label, extended_options)
+    """เลือกจาก list หรือพิมพ์เองได้ (return ค่าที่เลือก/พิม)"""
+    extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
+    choice = st.selectbox(label, extended_options)
 
 
 if choice == "อื่น ๆ (พิมพ์เอง)":
@@ -229,6 +229,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
