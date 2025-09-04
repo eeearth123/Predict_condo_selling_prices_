@@ -131,7 +131,7 @@ street = flexible_selectbox("ถนน - Street", SUB_TO_STREET.get(subdistrict,
 
 # 🌐 Zone (auto from street)
 zone = STREET_TO_ZONE.get(street, "")
-st.text_input("Zone (auto)", value=zone, disabled=True)
+st.text_input("Zone (auto)", value=zone)
 
 
 
@@ -231,6 +231,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
