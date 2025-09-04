@@ -171,8 +171,7 @@ is_pool_access = st.checkbox("ห้องเชื่อมสระว่า�
 is_corner = st.checkbox("ห้องมุม (Corner Room)")
 is_high_ceiling = st.checkbox("ห้องเพดานสูง (High Ceiling)")
 
-# ---------- Prepare Input ----------
-# ✅ ต้องอยู่ก่อน
+# ✅ สร้าง row ก่อน
 row = {
     "Area_sqm": area,
     "Project_Age_notreal": age,
@@ -191,14 +190,24 @@ row = {
     "is_high_ceiling": int(is_high_ceiling),
 }
 
-# ✅ แล้วค่อยตามด้วย
+# ✅ แล้วค่อยสร้าง DataFrame X
 X = pd.DataFrame([row], columns=ALL_FEATURES)
 
+# ✅ ค่อยมาเช็ค unseen values
+unseen_cols = []
+if 'X_train_all' in globals() and X_train_all is not None:
+    for col in ALL_FEATURES:
+        if col not in X.columns or col not in X_train_all.columns:
+            continue
+        user_value = X[col].values[0]
+        unique_values = X_train_all[col].unique()
 
-with st.expander("ดูข้อมูล (X)"):
-    st.dataframe(X, use_container_width=True)
+        if X[col].dtype == 'object' and user_value not in unique_values:
+            unseen_cols.append(col)
 
-st.divider()
+if unseen_cols:
+    st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฏในการฝึกโมเดล: {', '.join(unseen_cols)}")
+
 
 # ---------- Predict ----------
 if st.button("Predict Price (ล้านบาท)"):
@@ -238,6 +247,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
