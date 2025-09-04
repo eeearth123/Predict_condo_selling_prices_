@@ -135,8 +135,6 @@ st.text_input("Zone (auto)", value=zone, disabled=True)
 
 
 # ⚠️ แจ้งเตือนค่าที่ไม่เคยเจอ
-# --- หลังจากสร้าง X แล้ว ---
-X = pd.DataFrame([row], columns=ALL_FEATURES)
 
 # --- เช็ค unseen values ---
 unseen_cols = []
@@ -174,6 +172,7 @@ is_corner = st.checkbox("ห้องมุม (Corner Room)")
 is_high_ceiling = st.checkbox("ห้องเพดานสูง (High Ceiling)")
 
 # ---------- Prepare Input ----------
+# ✅ ต้องอยู่ก่อน
 row = {
     "Area_sqm": area,
     "Project_Age_notreal": age,
@@ -191,7 +190,10 @@ row = {
     "is_corner": int(is_corner),
     "is_high_ceiling": int(is_high_ceiling),
 }
+
+# ✅ แล้วค่อยตามด้วย
 X = pd.DataFrame([row], columns=ALL_FEATURES)
+
 
 with st.expander("ดูข้อมูล (X)"):
     st.dataframe(X, use_container_width=True)
@@ -236,6 +238,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
