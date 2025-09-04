@@ -140,8 +140,7 @@ st.text_input("Zone (auto)", value=zone, disabled=True)
 unseen_cols = []
 if 'X_train_all' in globals() and X_train_all is not None:
     for col in CAT_FEATURES:
-        if col not in X.columns: continue
-            unique_train = X_train_all[col].unique().tolist()
+        if col not in X.columns: continue unique_train = X_train_all[col].unique().tolist()
         if X[col].iloc[0] not in unique_train:
             unseen_cols.append(col)
 if unseen_cols:
@@ -227,6 +226,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
