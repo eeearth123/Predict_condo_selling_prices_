@@ -135,7 +135,7 @@ st.text_input("Zone (auto)", value=zone, disabled=True)
 
 
 # ⚠️ แจ้งเตือนค่าที่ไม่เคยเจอ
-X = pd.DataFrame([row], columns=ALL_FEATURES)
+
 # --- เช็ค unseen values ---
 unseen_cols = []
 
@@ -238,6 +238,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
