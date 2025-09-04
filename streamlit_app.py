@@ -58,6 +58,10 @@ def compute_confidence(X_train, X_new, top_k=5):
 
     except Exception as e:
         return None
+def smart_selectbox(label, options, default=""):
+    user_input = st.text_input(f"{label} (พิมพ์เองได้)", value=default)
+    selected = st.selectbox(f"เลือกจากรายการ {label} ที่แนะนำ", options=[""] + options)
+    return selected if selected else user_input
 
 
 # ---------- Load model ----------
@@ -113,42 +117,24 @@ with col3:
     month = st.selectbox("เดือนเปิดตัว — Launch Month", options=list(range(1,13)), index=0)
     m_sin, m_cos = month_to_sin_cos(month)
 
-# ---------- จังหวัด (Province)
-prov_options = sorted(PROV_TO_DIST.keys())
-province_input = st.text_input("จังหวัด - Province", value=prov_options[0] if prov_options else "")
-province_select = st.selectbox("เลือกจากจังหวัดที่แนะนำ:", options=prov_options, index=prov_options.index(province_input) if province_input in prov_options else 0)
-if province_select != province_input:
-    province_input = province_select
-province = province_input
+# จังหวัด
+province = smart_selectbox("จังหวัด (Province)", sorted(PROV_TO_DIST.keys()))
 
-# ---------- อำเภอ (District)
-dist_options = PROV_TO_DIST.get(province, [])
-district_input = st.text_input("เขต/อำเภอ - District", value=dist_options[0] if dist_options else "")
-district_select = st.selectbox("เลือกจากอำเภอที่แนะนำ:", options=dist_options, index=dist_options.index(district_input) if district_input in dist_options else 0)
-if district_select != district_input:
-    district_input = district_select
-district = district_input
+# อำเภอ
+district_options = PROV_TO_DIST.get(province, [])
+district = smart_selectbox("เขต/อำเภอ (District)", district_options)
 
-# ---------- ตำบล (Subdistrict)
-sub_options = DIST_TO_SUB.get(district, [])
-subdistrict_input = st.text_input("แขวง/ตำบล - Subdistrict", value=sub_options[0] if sub_options else "")
-subdistrict_select = st.selectbox("เลือกจากตำบลที่แนะนำ:", options=sub_options, index=sub_options.index(subdistrict_input) if subdistrict_input in sub_options else 0)
-if subdistrict_select != subdistrict_input:
-    subdistrict_input = subdistrict_select
-subdistrict = subdistrict_input
+# ตำบล
+subdistrict_options = DIST_TO_SUB.get(district, [])
+subdistrict = smart_selectbox("แขวง/ตำบล (Subdistrict)", subdistrict_options)
 
-# ---------- ถนน (Street)
+# ถนน
 street_options = SUB_TO_STREET.get(subdistrict, [])
-street_input = st.text_input("ถนน - Street", value=street_options[0] if street_options else "")
-street_select = st.selectbox("เลือกจากถนนที่แนะนำ:", options=street_options, index=street_options.index(street_input) if street_input in street_options else 0)
-if street_select != street_input:
-    street_input = street_select
-street = street_input
+street = smart_selectbox("ถนน (Street)", street_options)
 
-# ---------- Zone (กำหนดจากถนน หรือพิมพ์เอง)
-zone_auto = STREET_TO_ZONE.get(street, "")
-zone_input = st.text_input("Zone", value=zone_auto)
-zone = zone_input
+# Zone (Auto-fill แต่ให้พิมพ์ได้)
+default_zone = STREET_TO_ZONE.get(street, "")
+zone = st.text_input("Zone (พิมพ์ได้)", value=default_zone)
 
 
 room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options = [
@@ -230,6 +216,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
