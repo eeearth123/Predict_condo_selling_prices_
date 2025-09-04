@@ -58,10 +58,17 @@ def compute_confidence(X_train, X_new, top_k=5):
 
     except Exception as e:
         return None
-def smart_selectbox(label, options, default=""):
-    user_input = st.text_input(f"{label} (พิมพ์เองได้)", value=default)
-    selected = st.selectbox(f"เลือกจากรายการ {label} ที่แนะนำ", options=[""] + options)
-    return selected if selected else user_input
+def flexible_selectbox(label, options):
+"""เลือกจาก list หรือพิมพ์เองได้ (return ค่าที่เลือก/พิม)"""
+extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
+choice = st.selectbox(label, extended_options)
+
+
+if choice == "อื่น ๆ (พิมพ์เอง)":
+manual_value = st.text_input(f"กรุณาพิมพ์ {label} ที่ต้องการ")
+return manual_value.strip()
+else:
+return choice
 
 
 # ---------- Load model ----------
@@ -117,24 +124,30 @@ with col3:
     month = st.selectbox("เดือนเปิดตัว — Launch Month", options=list(range(1,13)), index=0)
     m_sin, m_cos = month_to_sin_cos(month)
 
-# จังหวัด
-province = smart_selectbox("จังหวัด (Province)", sorted(PROV_TO_DIST.keys()))
+# 🏢 ใช้กับจังหวัด-อำเภอ-ตำบล-ถนน
+province = flexible_selectbox("จังหวัด - Province", sorted(PROV_TO_DIST))
+district = flexible_selectbox("เขต/อำเภอ - District", PROV_TO_DIST.get(province, []))
+subdistrict = flexible_selectbox("แขวง/ตำบล - Subdistrict", DIST_TO_SUB.get(district, []))
+street = flexible_selectbox("ถนน - Street", SUB_TO_STREET.get(subdistrict, []))
 
-# อำเภอ
-district_options = PROV_TO_DIST.get(province, [])
-district = smart_selectbox("เขต/อำเภอ (District)", district_options)
 
-# ตำบล
-subdistrict_options = DIST_TO_SUB.get(district, [])
-subdistrict = smart_selectbox("แขวง/ตำบล (Subdistrict)", subdistrict_options)
+# 🌐 Zone (auto from street)
+zone = STREET_TO_ZONE.get(street, "")
+st.text_input("Zone (auto)", value=zone, disabled=True)
 
-# ถนน
-street_options = SUB_TO_STREET.get(subdistrict, [])
-street = smart_selectbox("ถนน (Street)", street_options)
 
-# Zone (Auto-fill แต่ให้พิมพ์ได้)
-default_zone = STREET_TO_ZONE.get(street, "")
-zone = st.text_input("Zone (พิมพ์ได้)", value=default_zone)
+# ⚠️ แจ้งเตือนค่าที่ไม่เคยเจอ
+unseen_cols = []
+if 'X_train_all' in globals() and X_train_all is not None:
+for col in CAT_FEATURES:
+if col not in X.columns: continue
+unique_train = X_train_all[col].unique().tolist()
+if X[col].iloc[0] not in unique_train:
+unseen_cols.append(col)
+
+
+if unseen_cols:
+st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฯในการฝึกโมเดล: {', '.join(unseen_cols)}")
 
 
 room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options = [
@@ -216,6 +229,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
