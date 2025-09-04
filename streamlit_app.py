@@ -134,23 +134,7 @@ zone = STREET_TO_ZONE.get(street, "")
 st.text_input("Zone (auto)", value=zone, disabled=True)
 
 
-# ⚠️ แจ้งเตือนค่าที่ไม่เคยเจอ
 
-# --- เช็ค unseen values ---
-unseen_cols = []
-
-if 'X_train_all' in globals() and X_train_all is not None:
-    for col in ALL_FEATURES:
-        if col not in X.columns or col not in X_train_all.columns:
-            continue
-        user_value = X[col].values[0]
-        unique_values = X_train_all[col].unique()
-
-        if X[col].dtype == 'object' and user_value not in unique_values:
-            unseen_cols.append(col)
-
-if unseen_cols:
-    st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฏในการฝึกโมเดล: {', '.join(unseen_cols)}")
 
 
 
@@ -247,6 +231,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
