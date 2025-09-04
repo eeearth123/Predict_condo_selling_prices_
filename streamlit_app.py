@@ -139,15 +139,13 @@ st.text_input("Zone (auto)", value=zone, disabled=True)
 # ⚠️ แจ้งเตือนค่าที่ไม่เคยเจอ
 unseen_cols = []
 if 'X_train_all' in globals() and X_train_all is not None:
-for col in CAT_FEATURES:
-if col not in X.columns: continue
-unique_train = X_train_all[col].unique().tolist()
-if X[col].iloc[0] not in unique_train:
-unseen_cols.append(col)
-
-
+    for col in CAT_FEATURES:
+        if col not in X.columns: continue
+            unique_train = X_train_all[col].unique().tolist()
+        if X[col].iloc[0] not in unique_train:
+            unseen_cols.append(col)
 if unseen_cols:
-st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฯในการฝึกโมเดล: {', '.join(unseen_cols)}")
+    st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฯในการฝึกโมเดล: {', '.join(unseen_cols)}")
 
 
 room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options = [
@@ -229,6 +227,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
