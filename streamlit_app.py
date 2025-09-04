@@ -65,10 +65,10 @@ def flexible_selectbox(label, options):
 
 
 if choice == "อื่น ๆ (พิมพ์เอง)":
-manual_value = st.text_input(f"กรุณาพิมพ์ {label} ที่ต้องการ")
-return manual_value.strip()
+    manual_value = st.text_input(f"กรุณาพิมพ์ {label} ที่ต้องการ")
+    return manual_value.strip()
 else:
-return choice
+    return choice
 
 
 # ---------- Load model ----------
@@ -229,6 +229,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
