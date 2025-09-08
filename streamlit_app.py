@@ -668,7 +668,7 @@ if st.button("Predict Price (ล้านบาท)"):
                 cat_conf = cat_similarity_percentile(
                     X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
                 )
-                HYBRID_ALPHA = 0.6
+                HYBRID_ALPHA = 0.3
                 conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
 
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
@@ -698,6 +698,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
