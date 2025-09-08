@@ -92,6 +92,68 @@ TwoSegmentRegressor.__module__ = "main"
 
 # ---------- Helpers ----------
 import re
+# ===== Confidence helpers (rescale + label + numeric-only toggle) =====
+def _prep_num(df):
+    """เตรียมคอลัมน์ตัวเลขก่อนสเกล (ลด outlier ของ Total_Units ด้วย log1p)"""
+    z = df.copy()
+    for c in NUM_ONLY:
+        if c not in z.columns: z[c] = 0.0
+    z = z[NUM_ONLY].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if "Total_Units" in z.columns:
+        z["Total_Units"] = np.log1p(z["Total_Units"])
+    return z
+
+def _robust_scale_fit_nums(X_num: pd.DataFrame):
+    from sklearn.preprocessing import RobustScaler, StandardScaler
+    r = RobustScaler().fit(X_num)
+    X_r = r.transform(X_num)
+    s = StandardScaler().fit(X_r)
+    return r, s
+
+def _robust_scale_transform_nums(X_num: pd.DataFrame, r, s):
+    return s.transform(r.transform(X_num))
+
+# Winsorize z-score สำหรับ drift report
+TOP_Z = 2.0
+def _dimension_drift_report(X_train_all, X_input_one, num_cols=NUM_ONLY, topn=3):
+    rep = []
+    Xt = _prep_num(X_train_all[num_cols])
+    mu = Xt.mean()
+    sd = Xt.std().replace(0, 1.0)
+
+    x = _prep_num(X_input_one[num_cols]).iloc[0]
+    z = ((x - mu) / sd).clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
+
+    for c in z.index[:topn]:
+        rep.append((c, float(z[c]), float(x[c])))
+    return rep
+
+# แปลงค่า 0..1 → เรต/ฉลากอ่านง่าย
+def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
+    """rescale แบบ affine ให้ช่วงใช้งานอยู่ระหว่าง ~20–85% (ปรับได้)
+       คืนค่า (conf_rescaled_0_1, label, color)"""
+    cr = float(conf_raw)
+    conf_rescaled = (cr - low) / (high - low)
+    conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
+
+    if conf_rescaled >= 0.75:
+        return conf_rescaled, "เหมือนมาก", "✅"
+    elif conf_rescaled >= 0.45:
+        return conf_rescaled, "ใกล้เคียง", "ℹ️"
+    else:
+        return conf_rescaled, "ต่างเยอะ", "⚠️"
+
+# (ทางเลือก) โชว์ numeric-only confidence แยกเพื่อเทียบ
+def numeric_only_confidence(X_input, scaler_r, scaler_s, Xt_scaled_train, dist_ref_01, top_k):
+    x_num = _prep_num(X_input[NUM_ONLY])
+    x_scaled = _robust_scale_transform_nums(x_num, scaler_r, scaler_s)
+    sim = cosine_similarity(Xt_scaled_train, x_scaled).ravel()
+    k = min(top_k, len(sim))
+    topk_mean = np.mean(np.sort(sim)[-k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+    pct = float((dist_ref_01 <= conf_01).mean())
+    return pct  # 0..1
+
 def _norm_obj(x):
     if pd.isna(x): return ""
     return re.sub(r"\s+", " ", str(x).strip().lower())
@@ -367,19 +429,20 @@ def _auto_top_k(n_train: int):
     import math
     return int(np.clip(math.sqrt(max(1, n_train)), 5, 25))
 
+# ===== Numeric-only percentile setup (ปรับให้ใช้ log1p กับ Total_Units) =====
 conf_ready = False
 if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
-    Xt = X_train_all.copy()
-    for c in NUM_ONLY:
-        if c not in Xt.columns: Xt[c] = 0.0
-    Xt_num = Xt[NUM_ONLY].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-
-    r_scaler, s_scaler = _robust_scale_fit(Xt_num)
-    Xt_scaled_train = _robust_scale_transform(Xt_num, r_scaler, s_scaler)
-
+    Xt_num = _prep_num(X_train_all)  # << ใช้ฟังก์ชันใหม่
+    r_scaler, s_scaler = _robust_scale_fit_nums(Xt_num)
+    Xt_scaled_train = _robust_scale_transform_nums(Xt_num, r_scaler, s_scaler)
     TOPK_REF = _auto_top_k(len(Xt_scaled_train))
     dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=TOPK_REF)
+
+    # Categorical encoder สำหรับ hybrid (ใช้ของเดิม)
+    cat_enc, X_cat_train = _fit_cat_encoder(X_train_all, CAT_FOR_CONF)
+
     conf_ready = True
+
 
 def confidence_numeric_percentile(X_input, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
                                   num_cols=NUM_ONLY, top_k=10):
@@ -651,6 +714,14 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
+        # ===== แสดงฝั่งที่ router ส่งไป + ความเชื่อมั่นของ gate =====
+        try:
+            side_label, side_prob = pipeline.predict_side(X)
+            side_txt = side_label[0]
+            st.caption(f"Router side: **{side_txt}**  (P[LUX]={side_prob[0]:.2f})")
+        except Exception:
+            pass
+
         # ===== Conformal Prediction Intervals =====
         if conformal_ready and (conformal_info is not None):
             q90, q95 = conformal_info["q90"], conformal_info["q95"]
@@ -667,49 +738,57 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== Hybrid Confidence (ปรับ alpha + unseen penalty) =====
+        # ===== Hybrid Confidence (คำนวณดิบ → rescale → label) =====
         if conf_ready:
             try:
+                # numeric part
                 num_conf = confidence_numeric_percentile(
                     X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
                     NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train))
                 )
+                # categorical part
                 cat_conf = cat_similarity_percentile(
                     X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
                 )
+                # ผสม (เลือก rate ได้: 0.2–0.4)
+                HYBRID_ALPHA = 0.25
+                conf_raw = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
 
-                # ① ลดน้ำหนัก numeric ให้ไม่กดค่ามากเกินไป
-                HYBRID_ALPHA = 0.2   # เดิม 0.6
-                conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
-
-                # ② ถ้ามีหมวดหมู่ที่ไม่เคยพบใน training → ลดคะแนนเล็กน้อย (penalty)
+                # penalty เบา ๆ เมื่อพบ unseen categories
                 cat_miss = []
                 for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]:
                     if c in X.columns and c in X_train_all.columns:
                         if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
                             cat_miss.append(c)
-                unseen_penalty_applied = False
                 if cat_miss:
-                    conf *= 0.85   # ลด ~15% (ปรับได้ 0.8–0.95)
-                    unseen_penalty_applied = True
+                    conf_raw *= 0.9  # -10%
 
-                st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
+                # rescale + label
+                conf_rescaled, conf_label, conf_icon = _rescale_and_label(conf_raw, low=0.20, high=0.85)
+                st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf_rescaled*100:.1f} %", help=f"Label: {conf_label}")
 
-                # Diagnostics
-                if conf < 0.7:
+                # แสดง label เด่น ๆ
+                st.info(f"{conf_icon} ระดับความคล้าย: **{conf_label}**  (raw={conf_raw*100:.1f}%)")
+
+                # (option) โชว์ numeric-only ไว้เทียบ
+                with st.expander("ดูค่า numeric-only / รายละเอียด (กดเพื่อเปิด)", expanded=False):
+                    num_only_pct = numeric_only_confidence(
+                        X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
+                        _auto_top_k(len(Xt_scaled_train))
+                    )
+                    st.write(f"Numeric-only confidence: **{num_only_pct*100:.1f}%**")
+                    st.caption(f"(alpha={HYBRID_ALPHA:.2f}, hybrid_raw={conf_raw*100:.1f}%)")
+
+                # Diagnostics เมื่อ “ต่างเยอะ”
+                if conf_label == "ต่างเยอะ":
                     with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
                         dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
                         if dr:
-                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score สูง, clipped):")
+                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score, clipped):")
                             st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
                         if cat_miss:
                             st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(cat_miss))
-                            if unseen_penalty_applied:
-                                st.caption("ℹ️ ลดคะแนนความมั่นใจ ~15% เพราะพบ unseen categories")
-                elif conf >= 0.9:
-                    st.success("✅ คล้ายข้อมูลฝึกมาก")
-                else:
-                    st.info("ℹ️ ใกล้เคียงพอสมควร")
+
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
@@ -717,6 +796,8 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
