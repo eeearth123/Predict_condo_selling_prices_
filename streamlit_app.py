@@ -430,16 +430,26 @@ def cat_similarity_percentile(X_input, enc, X_cat_train, cat_cols=CAT_FOR_CONF, 
 # สร้าง encoder สำหรับ categorical
 if conf_ready:
     cat_enc, X_cat_train = _fit_cat_encoder(X_train_all, CAT_FOR_CONF)
+# ใช้ Winsorize (clip) z-score เพื่อลดผล outlier ในรายงาน
+TOP_Z = 2.0  # ปรับได้ 1.5–3.0
+
 def _dimension_drift_report(X_train_all, X_input_one, num_cols=NUM_ONLY, topn=3):
+    """รายงานคอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด โดย clip z-score ใน [-TOP_Z, TOP_Z]"""
     rep = []
     Xt = X_train_all[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     mu = Xt.mean()
     sd = Xt.std().replace(0, 1.0)
+
     x = X_input_one[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).iloc[0]
-    z = ((x - mu) / sd).abs().sort_values(ascending=False)
+
+    # z-score แล้ว clip ลดอิทธิพลค่าที่สุดโต่ง
+    z_raw = (x - mu) / sd
+    z = z_raw.clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
+
     for c in z.index[:topn]:
         rep.append((c, float(z[c]), float(x[c])))
     return rep
+
 # ---------- Conformal Calibration ----------
 def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
     n = len(residuals)
@@ -698,6 +708,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
