@@ -248,6 +248,7 @@ if unseen_cols:
 # ---------- Predict ----------
 if st.button("Predict Price (ล้านบาท)"):
     try:
+        # ===== ทำนายราคา =====
         y_pred = pipeline.predict(X)
         pred_val = float(np.ravel(y_pred)[0])
         st.metric("ราคาคาดการณ์ (ล้านบาท)", f"{pred_val:.3f}")
@@ -255,75 +256,77 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # Confidence
-        # ✅ ลองคำนวณ Confidence Score ถ้ามีข้อมูลเทรน
-if X_train_all is not None:
-    try:
-        # 1) บังคับคอลัมน์ให้ตรงกับที่โมเดลเคยเทรน และเติม FLAGS=0
-        fill0 = {"is_pool_access":0, "is_corner":0, "is_high_ceiling":0}
-        X_train_used = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=fill0)
-        X_input_used = ensure_columns(X,            ALL_FEATURES, fill_value_map=fill0)
+        # ===== คำนวณ Confidence =====
+        if X_train_all is not None:
+            try:
+                # 1) บังคับคอลัมน์ให้ตรงกับที่โมเดลเคยเทรน และเติม FLAGS=0
+                fill0 = {"is_pool_access":0, "is_corner":0, "is_high_ceiling":0}
+                X_train_used = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=fill0)
+                X_input_used = ensure_columns(X,            ALL_FEATURES, fill_value_map=fill0)
 
-        # 2) เลือกฝั่งโมเดล (ตาม area-rule 250 ตร.ม. ของ TwoSegmentRegressor ต้นฉบับ)
-        side = "LUX" if float(X_input_used.loc[0, "Area_sqm"]) > 250 else "MASS"
+                # 2) เลือกฝั่งโมเดล (ตาม area-rule 250 ตร.ม.)
+                side = "LUX" if float(X_input_used.loc[0, "Area_sqm"]) > 250 else "MASS"
 
-        # 3) เข้ารหัสแบบเดียวกับโมเดลฝั่งนั้น; ถ้าไม่มี encoder ให้ one-hot ชั่วคราว
-        def encode_with_model(pipeline, Xdf, cat_cols, side):
-            Xdf = Xdf.copy()
-            if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
-                Xdf[cat_cols] = pipeline.lux_encoder.transform(Xdf[cat_cols])
-                return Xdf, "model"
-            if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
-                Xdf[cat_cols] = pipeline.mass_encoder.transform(Xdf[cat_cols])
-                return Xdf, "model"
-            return Xdf, "raw"
+                # 3) เข้ารหัสให้เหมือน encoder ที่ใช้จริง
+                def encode_with_model(pipeline, Xdf, cat_cols, side):
+                    Xdf = Xdf.copy()
+                    if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
+                        Xdf[cat_cols] = pipeline.lux_encoder.transform(Xdf[cat_cols])
+                        return Xdf
+                    if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
+                        Xdf[cat_cols] = pipeline.mass_encoder.transform(Xdf[cat_cols])
+                        return Xdf
+                    return Xdf  # ถ้าไม่มี encoder
 
-        Xtr_enc, mode_tr = encode_with_model(pipeline, X_train_used, CAT_FEATURES, side)
-        Xin_enc, mode_in = encode_with_model(pipeline, X_input_used, CAT_FEATURES, side)
+                X_train_enc = encode_with_model(pipeline, X_train_used, CAT_FEATURES, side)
+                X_input_enc = encode_with_model(pipeline, X_input_used, CAT_FEATURES, side)
 
-        # ถ้ายังเป็น object อยู่ (ไม่มี encoder) → one-hot ทั้ง train+input ร่วมกันเพื่อให้คอลัมน์ตรง
-        needs_onehot = any(getattr(Xtr_enc[c], "dtype", None) == "object" for c in CAT_FEATURES)
-        if needs_onehot or mode_tr != mode_in:
-            from sklearn.preprocessing import OneHotEncoder
-            from sklearn.compose import ColumnTransformer
-            from sklearn.pipeline import Pipeline
+                # 4) ถ้ายังเป็น object อยู่ → one-hot ชั่วคราว
+                needs_onehot = any(getattr(X_train_enc[c], "dtype", None) == "object" for c in CAT_FEATURES)
+                if needs_onehot:
+                    from sklearn.preprocessing import OneHotEncoder
+                    from sklearn.compose import ColumnTransformer
+                    from sklearn.pipeline import Pipeline
 
-            pre = ColumnTransformer([
-                ("num", "passthrough", [c for c in ALL_FEATURES if c not in CAT_FEATURES]),
-                ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CAT_FEATURES),
-            ])
-            oh = Pipeline([("pre", pre)])
-            combo = pd.concat([X_train_used, X_input_used], axis=0)
-            combo_arr = oh.fit_transform(combo)
-            combo_df  = pd.DataFrame(combo_arr)
+                    pre = ColumnTransformer([
+                        ("num", "passthrough", [c for c in ALL_FEATURES if c not in CAT_FEATURES]),
+                        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CAT_FEATURES),
+                    ])
+                    oh = Pipeline([("pre", pre)])
+                    combo = pd.concat([X_train_used, X_input_used], axis=0)
+                    combo_arr = oh.fit_transform(combo)
+                    combo_df  = pd.DataFrame(combo_arr)
 
-            Xtr_enc = combo_df.iloc[:-1, :].reset_index(drop=True)
-            Xin_enc = combo_df.iloc[-1:, :].reset_index(drop=True)
+                    X_train_enc = combo_df.iloc[:-1, :].reset_index(drop=True)
+                    X_input_enc = combo_df.iloc[-1:, :].reset_index(drop=True)
 
-        # 4) สเกลแล้วคำนวณ cosine similarity (top-k เฉลี่ย)
-        from sklearn.preprocessing import StandardScaler
-        from sklearn.metrics.pairwise import cosine_similarity
+                # 5) สเกลแล้วคำนวณ cosine similarity
+                from sklearn.preprocessing import StandardScaler
+                from sklearn.metrics.pairwise import cosine_similarity
 
-        scaler = StandardScaler()
-        tr_scaled = scaler.fit_transform(Xtr_enc)
-        in_scaled = scaler.transform(Xin_enc)
+                scaler = StandardScaler()
+                train_scaled = scaler.fit_transform(X_train_enc)
+                input_scaled = scaler.transform(X_input_enc)
 
-        sim = cosine_similarity(tr_scaled, in_scaled).ravel()
-        k = min(5, len(sim))
-        confidence = float(np.mean(np.sort(sim)[-k:]))
+                sim = cosine_similarity(train_scaled, input_scaled).ravel()
+                k = min(5, len(sim))
+                confidence = float(np.mean(np.sort(sim)[-k:]))
 
-        st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
-        if confidence >= 0.9:
-            st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
-        elif confidence >= 0.7:
-            st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
+                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+                if confidence >= 0.9:
+                    st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
+                elif confidence >= 0.7:
+                    st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
+                else:
+                    st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
+
+            except Exception as e:
+                st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
-            st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
+            st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
 
     except Exception as e:
-        st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
-else:
-    st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
+        st.error(f"ทำนายไม่สำเร็จ: {e}")
 
 
 
