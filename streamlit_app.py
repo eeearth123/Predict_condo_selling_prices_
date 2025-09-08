@@ -26,6 +26,69 @@ CAT_FEATURES = [
 ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
 PIPELINE_FILE = "pipeline.pkl"
 
+# ======== TwoSegmentRegressor shim for unpickle ========
+from dataclasses import dataclass, field
+import numpy as np
+import pandas as pd
+
+def _ensure_columns(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    d = df.copy()
+    for c in cols:
+        if c not in d.columns:
+            d[c] = 0
+    return d[cols]
+
+@dataclass
+class TwoSegmentRegressor:
+    threshold: float
+    selected_features: list
+    cat_cols: list
+    num_cols: list
+    mass_encoder: object
+    mass_model: object
+    lux_encoder: object
+    lux_model: object
+    gate_enc: object
+    gate_clf: object
+    gate_cutoff: float = 0.5
+    info: dict = field(default_factory=dict)
+
+    def _predict_side_mask(self, X: pd.DataFrame):
+        Xp = _ensure_columns(X, self.selected_features)
+        Xg = Xp.copy()
+        if len(self.cat_cols):
+            Xg[self.cat_cols] = self.gate_enc.transform(Xg[self.cat_cols])
+        p = self.gate_clf.predict_proba(Xg)[:, 1]
+        side = (p >= self.gate_cutoff)  # True = LUX
+        return side, p
+
+    def predict(self, X: pd.DataFrame):
+        Xp = _ensure_columns(X, self.selected_features)
+        side, _ = self._predict_side_mask(Xp)
+        yhat = np.empty(len(Xp), dtype=float)
+
+        if (~side).any():
+            Xm = Xp.loc[~side].copy()
+            if len(self.cat_cols):
+                Xm[self.cat_cols] = self.mass_encoder.transform(Xm[self.cat_cols])
+            yhat[~side] = self.mass_model.predict(Xm)
+
+        if side.any():
+            Xl = Xp.loc[side].copy()
+            if len(self.cat_cols):
+                Xl[self.cat_cols] = self.lux_encoder.transform(Xl[self.cat_cols])
+            yhat[side] = self.lux_model.predict(Xl)
+
+        return yhat
+
+    def predict_side(self, X: pd.DataFrame):
+        side, prob = self._predict_side_mask(X)
+        lab = np.where(side, "LUX", "MASS")
+        return lab, prob
+
+# 👇 บรรทัดนี้สำคัญ: ทำให้ pickle มองว่าคลาสอยู่ในโมดูล "main"
+TwoSegmentRegressor.__module__ = "main"
+# ======== end shim ========
 
 # ---------- Helpers ----------
 import re
@@ -635,6 +698,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
