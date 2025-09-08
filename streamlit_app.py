@@ -5,6 +5,9 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from locations_th import PROV_TO_DIST, DIST_TO_SUB, SUB_TO_STREET, STREET_TO_ZONE
+from sklearn.preprocessing import RobustScaler, StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 from sklearn.metrics.pairwise import cosine_similarity
 
 # ---------- Setup ----------
@@ -606,6 +609,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
