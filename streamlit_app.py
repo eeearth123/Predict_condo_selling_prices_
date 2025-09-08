@@ -34,30 +34,7 @@ def safe_float(x, default=0.0):
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
 
-def compute_confidence(X_train, X_new, top_k=5):
-    try:
-        # รวมข้อมูลเพื่อ normalize พร้อมกัน
-        combined = pd.concat([X_train, X_new], axis=0)
 
-        # Normalize (เฉพาะตัวเลข)
-        scaler = StandardScaler()
-        combined_scaled = scaler.fit_transform(combined)
-
-        X_train_scaled = combined_scaled[:-1]
-        X_new_scaled = combined_scaled[-1].reshape(1, -1)
-
-        # คำนวณ cosine similarity
-        sim = cosine_similarity(X_train_scaled, X_new_scaled).ravel()  # shape = (n_train,)
-
-        # หาค่าเฉลี่ยของ top-k similarity
-        top_k = min(top_k, len(sim))  # กันกรณี train น้อย
-        top_scores = np.sort(sim)[-top_k:]
-        confidence = float(np.mean(top_scores))
-
-        return confidence
-
-    except Exception as e:
-        return None
 def flexible_selectbox(label, options):
     """เลือกจาก list หรือพิมพ์เองได้ (return ค่าที่เลือก/พิม)"""
     extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
@@ -67,6 +44,71 @@ def flexible_selectbox(label, options):
         return manual_value.strip()
     else:
         return choice
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+
+def _which_side(pipeline, X_one_row):
+    """บอกว่าพยากรณ์แถวนี้ใช้ MASS หรือ LUX"""
+    # ถ้าเป็น TwoSegmentRegressor (area-rule 250 ตร.ม.)
+    if hasattr(pipeline, "predict"):
+        try:
+            # ถ้าคลาสคุณมีเมธอดภายในบอกฝั่งชัด ๆ ก็ใช้เลย
+            pass
+        except:
+            pass
+    # fallback แบบง่าย (ถ้ามี Area_sqm)
+    return "LUX" if float(X_one_row.get("Area_sqm", 0)) > 250 else "MASS"
+
+def _encode_like_model(pipeline, X_df, cat_cols, side):
+    """พยายามเข้ารหัสแบบเดียวกับโมเดล; ถ้าไม่มี ให้ one-hot ชั่วคราว"""
+    X_df = X_df.copy()
+    if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
+        X_df[cat_cols] = pipeline.lux_encoder.transform(X_df[cat_cols])
+        return X_df, "model"
+    if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
+        X_df[cat_cols] = pipeline.mass_encoder.transform(X_df[cat_cols])
+        return X_df, "model"
+
+    # ---- fallback: one-hot ทั้งชุดสำหรับคำนวณความมั่นใจเท่านั้น ----
+    pre = ColumnTransformer([
+        ("num", "passthrough", [c for c in X_df.columns if c not in cat_cols]),
+        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
+    ])
+    enc = Pipeline([("pre", pre)])
+    X_arr = enc.fit_transform(X_df)   # fit ด้วย train รวม input 1 แถว
+    X_encoded = pd.DataFrame(X_arr)
+    return X_encoded, "onehot"
+
+def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_cols, top_k=5):
+    # เตรียมชุดให้มีคอลัมน์ครบ
+    X_train_used = X_train_all.reindex(columns=all_cols).copy()
+    X_input = X_input_one.reindex(columns=all_cols).copy()
+
+    # เลือกฝั่งโมเดล (MASS/LUX) สำหรับแถวนี้
+    side = _which_side(pipeline, X_input.iloc[0].to_dict())
+
+    # เข้ารหัสให้เป็นตัวเลขแบบเดียวกับโมเดล (หรือ one-hot fallback)
+    X_train_enc, mode1 = _encode_like_model(pipeline, X_train_used, cat_cols, side)
+    # สำคัญ: ต้องใช้ encoder เดียวกันกับ train เพื่อให้คอลัมน์ตรงกัน
+    if mode1 == "model":
+        X_input_enc, _ = _encode_like_model(pipeline, X_input, cat_cols, side)
+    else:
+        # one-hot ใหม่ ต้อง fit จาก train+input พร้อมกันให้คอลัมน์ตรง
+        combo = pd.concat([X_train_used, X_input], axis=0)
+        X_combo_enc, _ = _encode_like_model(pipeline, combo, cat_cols, side)
+        X_train_enc = X_combo_enc.iloc[:-1, :].reset_index(drop=True)
+        X_input_enc = X_combo_enc.iloc[-1:, :].reset_index(drop=True)
+
+    # สเกลแล้วคำนวณ cosine
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train_enc)
+    X_new_scaled = scaler.transform(X_input_enc)
+
+    sim = cosine_similarity(X_train_scaled, X_new_scaled).ravel()
+    k = min(top_k, len(sim))
+    conf = float(np.mean(np.sort(sim)[-k:]))
+    return conf
 
 
 # ---------- Load model ----------
@@ -196,34 +238,30 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # ✅ ลองคำนวณ Confidence Score ถ้ามีข้อมูลเทรน
+        # Confidence
         if X_train_all is not None:
             try:
-                # ✅ เตรียม X_train ที่ใช้ encoder เดียวกัน
-                X_train_used = X_train_all[ALL_FEATURES].copy()
-                if hasattr(pipeline, 'mass_encoder'):
-                    X_train_used[CAT_FEATURES] = pipeline.mass_encoder.transform(X_train_used[CAT_FEATURES])
-                    X_input = X[ALL_FEATURES].copy()
-                    X_input[CAT_FEATURES] = pipeline.mass_encoder.transform(X_input[CAT_FEATURES])
-                else:
-                    X_input = X[ALL_FEATURES].copy()
-
-                confidence = compute_confidence(X_train_used, X_input)
-
-                if confidence is not None:
-                    st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
-                    if confidence >= 0.9:
-                        st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
-                    elif confidence >= 0.7:
-                        st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
-                    else:
-                        st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
-
+                conf = compute_confidence_robust(
+                    pipeline=pipeline,
+                    X_train_all=X_train_all[ALL_FEATURES],
+                    X_input_one=X[ALL_FEATURES],
+                    all_cols=ALL_FEATURES,
+                    cat_cols=CAT_FEATURES,
+                    top_k=5
+                )
+                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{conf*100:.1f} %")
+                if conf >= 0.9:   st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
+                elif conf >= 0.7: st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
+                else:             st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+        else:
+            st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
