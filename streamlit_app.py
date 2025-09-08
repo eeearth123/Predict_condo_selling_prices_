@@ -10,16 +10,19 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ---------- Setup ----------
 st.set_page_config(page_title="Condo Price Predictor", page_icon="🏢", layout="wide")
 
+FLAGS = ["is_pool_access", "is_corner", "is_high_ceiling"]  # เราจะล็อก = 0 เสมอ
+
 NUM_FEATURES = [
     "Area_sqm", "Project_Age_notreal", "Floors", "Total_Units",
     "Launch_Month_sin", "Launch_Month_cos",
-    "is_pool_access", "is_corner", "is_high_ceiling"
-]
+] + FLAGS  # ยังต้องอยู่ใน ALL_FEATURES เพื่อให้ตรงกับโมเดล
+
 CAT_FEATURES = [
     "Room_Type_Base", "Province", "District", "Subdistrict", "Street", "Zone"
 ]
 ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
 PIPELINE_FILE = "pipeline.pkl"
+
 
 # ---------- Helpers ----------
 def month_to_sin_cos(m: int):
@@ -29,6 +32,16 @@ def month_to_sin_cos(m: int):
 def safe_float(x, default=0.0):
     try: return float(x)
     except: return float(default)
+        
+def ensure_columns(df: pd.DataFrame, cols: list, fill_value_map: dict = None) -> pd.DataFrame:
+    """ทำให้ df มีคอลัมน์ตรงกับ cols ทุกตัว; ถ้าไม่มีให้เติม และเรียงคอลัมน์ให้เหมือนกัน"""
+    df = df.copy()
+    fill_value_map = fill_value_map or {}
+    for c in cols:
+        if c not in df.columns:
+            df[c] = fill_value_map.get(c, 0)
+    # ถ้ามีคอลัมน์เกินมา ปล่อยไว้ได้ แต่เราจะเลือกเฉพาะที่ต้องใช้
+    return df[cols]
 
 
 from sklearn.metrics.pairwise import cosine_similarity
@@ -193,7 +206,7 @@ room_type_base = st.selectbox("ประเภทห้อง — Room_Type", op
 
 
 
-# ✅ สร้าง row ก่อน
+# ✅ สร้าง row ก่อน (ไม่มีอินพุตสำหรับ FLAGS)
 row = {
     "Area_sqm": area,
     "Project_Age_notreal": age,
@@ -207,7 +220,11 @@ row = {
     "Street": street,
     "Zone": zone,
     "Room_Type_Base": room_type_base,
+    "is_pool_access": 0,
+    "is_corner": 0,
+    "is_high_ceiling": 0,
 }
+
 
 # ✅ แล้วค่อยสร้าง DataFrame X
 X = pd.DataFrame([row], columns=ALL_FEATURES)
@@ -239,27 +256,76 @@ if st.button("Predict Price (ล้านบาท)"):
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
         # Confidence
-        if X_train_all is not None:
-            try:
-                conf = compute_confidence_robust(
-                    pipeline=pipeline,
-                    X_train_all=X_train_all[ALL_FEATURES],
-                    X_input_one=X[ALL_FEATURES],
-                    all_cols=ALL_FEATURES,
-                    cat_cols=CAT_FEATURES,
-                    top_k=5
-                )
-                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{conf*100:.1f} %")
-                if conf >= 0.9:   st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
-                elif conf >= 0.7: st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
-                else:             st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
-            except Exception as e:
-                st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+        # ✅ ลองคำนวณ Confidence Score ถ้ามีข้อมูลเทรน
+if X_train_all is not None:
+    try:
+        # 1) บังคับคอลัมน์ให้ตรงกับที่โมเดลเคยเทรน และเติม FLAGS=0
+        fill0 = {"is_pool_access":0, "is_corner":0, "is_high_ceiling":0}
+        X_train_used = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=fill0)
+        X_input_used = ensure_columns(X,            ALL_FEATURES, fill_value_map=fill0)
+
+        # 2) เลือกฝั่งโมเดล (ตาม area-rule 250 ตร.ม. ของ TwoSegmentRegressor ต้นฉบับ)
+        side = "LUX" if float(X_input_used.loc[0, "Area_sqm"]) > 250 else "MASS"
+
+        # 3) เข้ารหัสแบบเดียวกับโมเดลฝั่งนั้น; ถ้าไม่มี encoder ให้ one-hot ชั่วคราว
+        def encode_with_model(pipeline, Xdf, cat_cols, side):
+            Xdf = Xdf.copy()
+            if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
+                Xdf[cat_cols] = pipeline.lux_encoder.transform(Xdf[cat_cols])
+                return Xdf, "model"
+            if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
+                Xdf[cat_cols] = pipeline.mass_encoder.transform(Xdf[cat_cols])
+                return Xdf, "model"
+            return Xdf, "raw"
+
+        Xtr_enc, mode_tr = encode_with_model(pipeline, X_train_used, CAT_FEATURES, side)
+        Xin_enc, mode_in = encode_with_model(pipeline, X_input_used, CAT_FEATURES, side)
+
+        # ถ้ายังเป็น object อยู่ (ไม่มี encoder) → one-hot ทั้ง train+input ร่วมกันเพื่อให้คอลัมน์ตรง
+        needs_onehot = any(getattr(Xtr_enc[c], "dtype", None) == "object" for c in CAT_FEATURES)
+        if needs_onehot or mode_tr != mode_in:
+            from sklearn.preprocessing import OneHotEncoder
+            from sklearn.compose import ColumnTransformer
+            from sklearn.pipeline import Pipeline
+
+            pre = ColumnTransformer([
+                ("num", "passthrough", [c for c in ALL_FEATURES if c not in CAT_FEATURES]),
+                ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CAT_FEATURES),
+            ])
+            oh = Pipeline([("pre", pre)])
+            combo = pd.concat([X_train_used, X_input_used], axis=0)
+            combo_arr = oh.fit_transform(combo)
+            combo_df  = pd.DataFrame(combo_arr)
+
+            Xtr_enc = combo_df.iloc[:-1, :].reset_index(drop=True)
+            Xin_enc = combo_df.iloc[-1:, :].reset_index(drop=True)
+
+        # 4) สเกลแล้วคำนวณ cosine similarity (top-k เฉลี่ย)
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        scaler = StandardScaler()
+        tr_scaled = scaler.fit_transform(Xtr_enc)
+        in_scaled = scaler.transform(Xin_enc)
+
+        sim = cosine_similarity(tr_scaled, in_scaled).ravel()
+        k = min(5, len(sim))
+        confidence = float(np.mean(np.sort(sim)[-k:]))
+
+        st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
+        if confidence >= 0.9:
+            st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
+        elif confidence >= 0.7:
+            st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
         else:
-            st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
+            st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
 
     except Exception as e:
-        st.error(f"ทำนายไม่สำเร็จ: {e}")
+        st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+else:
+    st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
+
+
 
 
 
