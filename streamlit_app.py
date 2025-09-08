@@ -654,7 +654,6 @@ if st.button("Predict Price (ล้านบาท)"):
         # ===== Conformal Prediction Intervals =====
         if conformal_ready and (conformal_info is not None):
             q90, q95 = conformal_info["q90"], conformal_info["q95"]
-            # กันค่าติดลบ (ราคาไม่ควรต่ำกว่า 0)
             pi90 = (max(0.0, pred_val - q90), max(0.0, pred_val + q90))
             pi95 = (max(0.0, pred_val - q95), max(0.0, pred_val + q95))
 
@@ -668,7 +667,7 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== Hybrid Confidence =====
+        # ===== Hybrid Confidence (ปรับ alpha + unseen penalty) =====
         if conf_ready:
             try:
                 num_conf = confidence_numeric_percentile(
@@ -678,25 +677,35 @@ if st.button("Predict Price (ล้านบาท)"):
                 cat_conf = cat_similarity_percentile(
                     X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
                 )
-                HYBRID_ALPHA = 0.3
+
+                # ① ลดน้ำหนัก numeric ให้ไม่กดค่ามากเกินไป
+                HYBRID_ALPHA = 0.3   # เดิม 0.6
                 conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
+
+                # ② ถ้ามีหมวดหมู่ที่ไม่เคยพบใน training → ลดคะแนนเล็กน้อย (penalty)
+                cat_miss = []
+                for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]:
+                    if c in X.columns and c in X_train_all.columns:
+                        if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
+                            cat_miss.append(c)
+                unseen_penalty_applied = False
+                if cat_miss:
+                    conf *= 0.85   # ลด ~15% (ปรับได้ 0.8–0.95)
+                    unseen_penalty_applied = True
 
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
 
-                # Diagnostic ถ้าคะแนนต่ำ
+                # Diagnostics
                 if conf < 0.7:
                     with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
                         dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
                         if dr:
-                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score สูง):")
+                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score สูง, clipped):")
                             st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
-                        cat_miss = []
-                        for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]:
-                            if c in X.columns and c in X_train_all.columns:
-                                if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
-                                    cat_miss.append(c)
                         if cat_miss:
                             st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(cat_miss))
+                            if unseen_penalty_applied:
+                                st.caption("ℹ️ ลดคะแนนความมั่นใจ ~15% เพราะพบ unseen categories")
                 elif conf >= 0.9:
                     st.success("✅ คล้ายข้อมูลฝึกมาก")
                 else:
@@ -708,6 +717,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
