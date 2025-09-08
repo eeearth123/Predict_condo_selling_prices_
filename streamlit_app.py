@@ -212,44 +212,54 @@ try:
 except:
     st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
     X_train_all = None
-# ใส่ไว้ตอนโหลดแอป (หลังโหลด X_train_all)
+# ===== Confidence (numeric-only percentile) setup =====
 NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np, pandas as pd
 
-# 1) เตรียมสเกลจาก train-only (เฉพาะคอลัมน์ตัวเลข)
 def _fit_numeric_scaler(X_train_all, num_cols=NUM_ONLY):
-    Xt = X_train_all[num_cols].copy().astype(float)
-    scaler = StandardScaler().fit(Xt)
+    Xt = X_train_all.copy()
+    # เติมคอลัมน์ที่ขาด → 0 (กัน KeyError)
+    for c in num_cols:
+        if c not in Xt.columns:
+            Xt[c] = 0.0
+    Xt = Xt[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    scaler = StandardScaler().fit(Xt)      # fit เฉพาะ train
     Xt_scaled = scaler.transform(Xt)
-    return scaler, Xt_scaled  # เก็บ Xt_scaled ไว้ใช้คำนวณ distribution
+    return scaler, Xt_scaled
 
-# 2) สร้าง distribution ของ "ความคล้ายภายใน train" (top-k เฉลี่ย)
 def _train_similarity_distribution(Xt_scaled, top_k=10):
-    # cosine กับตัวเอง แล้วตัดค่าทะแยงออก (ไม่เทียบตัวเอง)
+    # cosine กับตัวเอง แล้วตัดค่าทะแยง (ไม่เทียบตัวเอง)
     sim = cosine_similarity(Xt_scaled)
     np.fill_diagonal(sim, -np.inf)
-    # เอาค่าเฉลี่ยของ top-k เพื่อนบ้านที่ใกล้สุดสำหรับแต่ละแถว
+    # ค่าเฉลี่ย top-k เพื่อนบ้านที่ใกล้สุดของแต่ละแถวใน train
     topk_mean = np.mean(np.sort(sim, axis=1)[:, -top_k:], axis=1)
-    # map เป็นช่วง [0,1] (cosine เป็น [-1,1])
+    # map [-1,1] → [0,1]
     topk_mean_01 = (topk_mean + 1.0) / 2.0
-    return topk_mean_01  # ใช้เป็นฐานเปอร์เซ็นไทล์
+    return topk_mean_01
 
-# 3) คำนวณ confidence สำหรับอินพุตใหม่ → คืนค่าเปอร์เซ็นไทล์ (0..1)
 def confidence_numeric_percentile(X_input, scaler, Xt_scaled_train, dist_ref_01, num_cols=NUM_ONLY, top_k=10):
-    x = X_input[num_cols].copy().astype(float)
+    x = X_input.copy()
+    for c in num_cols:
+        if c not in x.columns:
+            x[c] = 0.0
+    x = x[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     x_scaled = scaler.transform(x)
     sim = cosine_similarity(Xt_scaled_train, x_scaled).ravel()
     topk_mean = np.mean(np.sort(sim)[-top_k:])
     conf_01 = (topk_mean + 1.0) / 2.0
-    # เปอร์เซ็นไทล์เทียบกับ distribution ของ train
+    # เปอร์เซ็นไทล์เมื่อเทียบกับ distribution ของ train
     pct = float((dist_ref_01 <= conf_01).mean())
-    return pct  # ใช้เป็น confidence
-# สร้างครั้งเดียวตอนเริ่มแอป (หลังโหลด X_train_all)
-scaler_num, Xt_scaled_train = _fit_numeric_scaler(X_train_all, NUM_ONLY)
-dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=10)
+    return pct
+
+# สร้างอ็อบเจ็กต์อ้างอิงสำหรับ confidence เฉพาะเมื่อมี X_train_all พร้อมใช้งาน
+conf_ready = False
+if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
+    scaler_num, Xt_scaled_train = _fit_numeric_scaler(X_train_all, NUM_ONLY)
+    dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=10)
+    conf_ready = True
+
 
 # ---------- UI ----------
 st.title("🏢 Condo Price Predictor")
@@ -405,63 +415,13 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # ===== คำนวณ Confidence =====
-        if X_train_all is not None:
+        # ===== คำนวณ Confidence (numeric-only percentile) =====
+        if conf_ready:
             try:
-                # 1) บังคับคอลัมน์ให้ตรงกับที่โมเดลเคยเทรน และเติม FLAGS=0
-                fill0 = {"is_pool_access":0, "is_corner":0, "is_high_ceiling":0}
-                X_train_used = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=fill0)
-                X_input_used = ensure_columns(X,            ALL_FEATURES, fill_value_map=fill0)
-
-                # 2) เลือกฝั่งโมเดล (ตาม area-rule 250 ตร.ม.)
-                side = "LUX" if float(X_input_used.loc[0, "Area_sqm"]) > 250 else "MASS"
-
-                # 3) เข้ารหัสให้เหมือน encoder ที่ใช้จริง
-                def encode_with_model(pipeline, Xdf, cat_cols, side):
-                    Xdf = Xdf.copy()
-                    if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
-                        Xdf[cat_cols] = pipeline.lux_encoder.transform(Xdf[cat_cols])
-                        return Xdf
-                    if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
-                        Xdf[cat_cols] = pipeline.mass_encoder.transform(Xdf[cat_cols])
-                        return Xdf
-                    return Xdf  # ถ้าไม่มี encoder
-
-                X_train_enc = encode_with_model(pipeline, X_train_used, CAT_FEATURES, side)
-                X_input_enc = encode_with_model(pipeline, X_input_used, CAT_FEATURES, side)
-
-                # 4) ถ้ายังเป็น object อยู่ → one-hot ชั่วคราว
-                needs_onehot = any(getattr(X_train_enc[c], "dtype", None) == "object" for c in CAT_FEATURES)
-                if needs_onehot:
-                    from sklearn.preprocessing import OneHotEncoder
-                    from sklearn.compose import ColumnTransformer
-                    from sklearn.pipeline import Pipeline
-
-                    pre = ColumnTransformer([
-                        ("num", "passthrough", [c for c in ALL_FEATURES if c not in CAT_FEATURES]),
-                        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CAT_FEATURES),
-                    ])
-                    oh = Pipeline([("pre", pre)])
-                    combo = pd.concat([X_train_used, X_input_used], axis=0)
-                    combo_arr = oh.fit_transform(combo)
-                    combo_df  = pd.DataFrame(combo_arr)
-
-                    X_train_enc = combo_df.iloc[:-1, :].reset_index(drop=True)
-                    X_input_enc = combo_df.iloc[-1:, :].reset_index(drop=True)
-
-                # 5) สเกลแล้วคำนวณ cosine similarity
-                from sklearn.preprocessing import StandardScaler
-                from sklearn.metrics.pairwise import cosine_similarity
-
-                scaler = StandardScaler()
-                train_scaled = scaler.fit_transform(X_train_enc)
-                input_scaled = scaler.transform(X_input_enc)
-
-                sim = cosine_similarity(train_scaled, input_scaled).ravel()
-                k = min(5, len(sim))
-                confidence = float(np.mean(np.sort(sim)[-k:]))
-
-                conf = confidence_numeric_percentile(X, scaler_num, Xt_scaled_train, dist_ref_01, NUM_ONLY, top_k=10)
+                conf = confidence_numeric_percentile(
+                    X, scaler_num, Xt_scaled_train, dist_ref_01,
+                    NUM_ONLY, top_k=10
+                )
                 st.metric("ความมั่นใจของโมเดล (Confidence)", f"{conf*100:.1f} %")
                 if conf >= 0.9:
                     st.success("✅ คล้ายข้อมูลฝึกมาก")
@@ -469,14 +429,15 @@ if st.button("Predict Price (ล้านบาท)"):
                     st.info("ℹ️ ใกล้เคียงพอสมควร")
                 else:
                     st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
-
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
-            st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
+            st.warning("⚠️ ไม่พบ X_train.pkl หรือข้อมูล train ไม่พร้อม — จึงไม่แสดง Confidence")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
