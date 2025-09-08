@@ -160,12 +160,12 @@ def _encode_like_model(pipeline, X_df, cat_cols, side):
     # ---- fallback: one-hot ทั้งชุดสำหรับคำนวณความมั่นใจเท่านั้น ----
     pre = ColumnTransformer([
         ("num", "passthrough", [c for c in X_df.columns if c not in cat_cols]),
-        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
-    ])
+        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),])
     enc = Pipeline([("pre", pre)])
-    X_arr = enc.fit_transform(X_df)   # fit ด้วย train รวม input 1 แถว
+    X_arr = enc.fit_transform(X_df)
     X_encoded = pd.DataFrame(X_arr)
     return X_encoded, "onehot"
+
 
 def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_cols, top_k=5):
     # เตรียมชุดให้มีคอลัมน์ครบ
@@ -275,12 +275,12 @@ def _robust_scale_transform(X: pd.DataFrame, r, s):
 def _auto_top_k(n_train: int):
     import math
     return int(np.clip(math.sqrt(max(1, n_train)), 5, 25))
+
 conf_ready = False
 if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
     Xt = X_train_all.copy()
     for c in NUM_ONLY:
-        if c not in Xt.columns:
-            Xt[c] = 0.0
+        if c not in Xt.columns: Xt[c] = 0.0
     Xt_num = Xt[NUM_ONLY].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     r_scaler, s_scaler = _robust_scale_fit(Xt_num)
@@ -289,6 +289,7 @@ if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_t
     TOPK_REF = _auto_top_k(len(Xt_scaled_train))
     dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=TOPK_REF)
     conf_ready = True
+
 def confidence_numeric_percentile(X_input, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
                                   num_cols=NUM_ONLY, top_k=10):
     x = X_input.copy()
@@ -312,10 +313,11 @@ def _fit_cat_encoder(X_train_all, cat_cols=CAT_FOR_CONF):
     Xt = X_train_all.copy()
     for c in cat_cols:
         if c not in Xt.columns: Xt[c] = ""
-    enc = OneHotEncoder(handle_unknown="ignore", sparse=False)
+    enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     enc.fit(Xt[cat_cols].astype(str))
     X_cat = enc.transform(Xt[cat_cols].astype(str))
     return enc, X_cat
+
 
 def cat_similarity_percentile(X_input, enc, X_cat_train, cat_cols=CAT_FOR_CONF, top_k=10):
     xi = X_input.copy()
@@ -572,16 +574,11 @@ if st.button("Predict Price (ล้านบาท)"):
 
         # ===== Hybrid Confidence =====
         if conf_ready:
-            try:
-                num_conf = confidence_numeric_percentile(
-                    X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
-                    NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train))
-                )
-                cat_conf = cat_similarity_percentile(
-                    X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
-                )
-                HYBRID_ALPHA = 0.6  # ถ่วง numeric มากกว่านิด
+            try:num_conf = confidence_numeric_percentile(X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train)))
+                cat_conf = cat_similarity_percentile(X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train)))
+                HYBRID_ALPHA = 0.6
                 conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
+
 
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
                 if conf >= 0.9:
@@ -609,6 +606,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
