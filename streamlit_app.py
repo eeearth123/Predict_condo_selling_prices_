@@ -26,6 +26,13 @@ PIPELINE_FILE = "pipeline.pkl"
 
 # ---------- Helpers ----------
 import re
+def _norm_obj(x):
+    if pd.isna(x): return ""
+    return re.sub(r"\s+", " ", str(x).strip().lower())
+
+def _unique_normalized(series: pd.Series):
+    return set(series.dropna().astype(str).map(_norm_obj).unique())
+
 
 def _norm_txt(s):
     if s is None: return ""
@@ -253,12 +260,141 @@ def confidence_numeric_percentile(X_input, scaler, Xt_scaled_train, dist_ref_01,
     pct = float((dist_ref_01 <= conf_01).mean())
     return pct
 
-# สร้างอ็อบเจ็กต์อ้างอิงสำหรับ confidence เฉพาะเมื่อมี X_train_all พร้อมใช้งาน
+def _robust_scale_fit(X: pd.DataFrame):
+    r = RobustScaler().fit(X)
+    X_r = r.transform(X)
+    s = StandardScaler().fit(X_r)
+    return r, s
+
+def _robust_scale_transform(X: pd.DataFrame, r, s):
+    return s.transform(r.transform(X))
+
+def _auto_top_k(n_train: int):
+    import math
+    return int(np.clip(math.sqrt(max(1, n_train)), 5, 25))
 conf_ready = False
 if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
-    scaler_num, Xt_scaled_train = _fit_numeric_scaler(X_train_all, NUM_ONLY)
-    dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=10)
+    Xt = X_train_all.copy()
+    for c in NUM_ONLY:
+        if c not in Xt.columns:
+            Xt[c] = 0.0
+    Xt_num = Xt[NUM_ONLY].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    r_scaler, s_scaler = _robust_scale_fit(Xt_num)
+    Xt_scaled_train = _robust_scale_transform(Xt_num, r_scaler, s_scaler)
+
+    TOPK_REF = _auto_top_k(len(Xt_scaled_train))
+    dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=TOPK_REF)
     conf_ready = True
+def confidence_numeric_percentile(X_input, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
+                                  num_cols=NUM_ONLY, top_k=10):
+    x = X_input.copy()
+    for c in num_cols:
+        if c not in x.columns:
+            x[c] = 0.0
+    x = x[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    x_scaled = _robust_scale_transform(x, r_scaler, s_scaler)
+
+    sim = cosine_similarity(Xt_scaled_train, x_scaled).ravel()
+    k = min(top_k, len(sim))
+    topk_mean = np.mean(np.sort(sim)[-k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+    pct = float((dist_ref_01 <= conf_01).mean())
+    return pct
+from sklearn.preprocessing import OneHotEncoder
+
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
+
+def _fit_cat_encoder(X_train_all, cat_cols=CAT_FOR_CONF):
+    Xt = X_train_all.copy()
+    for c in cat_cols:
+        if c not in Xt.columns: Xt[c] = ""
+    enc = OneHotEncoder(handle_unknown="ignore", sparse=False)
+    enc.fit(Xt[cat_cols].astype(str))
+    X_cat = enc.transform(Xt[cat_cols].astype(str))
+    return enc, X_cat
+
+def cat_similarity_percentile(X_input, enc, X_cat_train, cat_cols=CAT_FOR_CONF, top_k=10):
+    xi = X_input.copy()
+    for c in cat_cols:
+        if c not in xi.columns: xi[c] = ""
+    Xi_cat = enc.transform(xi[cat_cols].astype(str))
+    sim = cosine_similarity(X_cat_train, Xi_cat).ravel()
+    k = min(top_k, len(sim))
+    topk_mean = np.mean(np.sort(sim)[-k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+
+    sim_train = cosine_similarity(X_cat_train)
+    np.fill_diagonal(sim_train, -np.inf)
+    topk_mean_train = np.mean(np.sort(sim_train, axis=1)[:, -k:], axis=1)
+    topk_mean_train_01 = (topk_mean_train + 1.0) / 2.0
+    pct = float((topk_mean_train_01 <= conf_01).mean())
+    return pct
+
+# สร้าง encoder สำหรับ categorical
+if conf_ready:
+    cat_enc, X_cat_train = _fit_cat_encoder(X_train_all, CAT_FOR_CONF)
+def _dimension_drift_report(X_train_all, X_input_one, num_cols=NUM_ONLY, topn=3):
+    rep = []
+    Xt = X_train_all[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    mu = Xt.mean()
+    sd = Xt.std().replace(0, 1.0)
+    x = X_input_one[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).iloc[0]
+    z = ((x - mu) / sd).abs().sort_values(ascending=False)
+    for c in z.index[:topn]:
+        rep.append((c, float(z[c]), float(x[c])))
+    return rep
+# ---------- Conformal Prediction (Split Conformal) ----------
+def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
+    # คำนวณ quantile แบบ conformal: (1 - alpha) * (1 + 1/n)
+    n = len(residuals)
+    q = np.quantile(residuals, min(1.0, (1 - alpha) * (1 + 1.0 / max(1, n))), method="higher")
+    return float(q)
+
+def fit_conformal_from_calib(pipeline, X_train_df, y_train_arr, calib_frac=0.2, seed=42):
+    """ไม่ train โมเดลใหม่ ใช้โมเดลที่โหลดมาแล้ว → สุ่มแบ่ง calibration set เพื่อสร้าง residual distribution"""
+    if len(X_train_df) != len(y_train_arr):
+        raise ValueError("X_train และ y_train ต้องมีจำนวนแถวเท่ากันสำหรับ conformal")
+
+    rng = np.random.RandomState(seed)
+    idx = np.arange(len(X_train_df))
+    rng.shuffle(idx)
+    n_cal = max(50, int(len(idx) * calib_frac))  # อย่างน้อย 50 แถว
+    calib_idx = idx[:n_cal]
+
+    Xc = X_train_df.iloc[calib_idx].copy()
+    yc = np.asarray(y_train_arr)[calib_idx]
+
+    # ให้แน่ใจว่าคอลัมน์ครบและเรียงแบบเดียวกับตอนทำนาย
+    Xc = ensure_columns(Xc, ALL_FEATURES, fill_value_map=None)
+
+    yhat_c = np.ravel(pipeline.predict(Xc))
+    resid = np.abs(yc - yhat_c)
+
+    q90 = _conformal_quantile(resid, alpha=0.10)
+    q95 = _conformal_quantile(resid, alpha=0.05)
+    return {"q90": q90, "q95": q95, "n_calib": int(n_cal)}
+conformal_ready = False
+conformal_info = None
+try:
+    # รองรับทั้ง .pkl / .npy (ถ้าอยากใช้ .csv ให้โหลดเป็น Series เอง)
+    if os.path.exists("y_train.pkl"):
+        y_train_all = joblib.load("y_train.pkl")
+    elif os.path.exists("y_train.npy"):
+        y_train_all = np.load("y_train.npy")
+    else:
+        y_train_all = None
+
+    if y_train_all is not None and X_train_all is not None and isinstance(X_train_all, pd.DataFrame):
+        # บังคับให้ X_train_all มีคอลัมน์ครบ
+        Xt_full = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=None)
+        conformal_info = fit_conformal_from_calib(pipeline, Xt_full, y_train_all, calib_frac=0.2, seed=42)
+        conformal_ready = True
+        st.sidebar.success(f"Conformal ready: calib_n={conformal_info['n_calib']}")
+    else:
+        st.sidebar.warning("⚠️ ไม่พบ y_train.pkl / y_train.npy → ยังไม่สามารถคำนวณช่วงคาดการณ์ (PI) ได้")
+except Exception as e:
+    st.sidebar.warning(f"ตั้งค่า Conformal ไม่สำเร็จ: {e}")
 
 
 # ---------- UI ----------
@@ -388,21 +524,21 @@ row = {
 # ✅ แล้วค่อยสร้าง DataFrame X
 X = pd.DataFrame([row], columns=ALL_FEATURES)
 
-# ✅ ค่อยมาเช็ค unseen values
+# ✅ ค่อยมาเช็ค unseen values (แบบ normalize)
 unseen_cols = []
-if 'X_train_all' in globals() and X_train_all is not None:
+if 'X_train_all' in globals() and isinstance(X_train_all, pd.DataFrame) and X_train_all is not None:
     for col in ALL_FEATURES:
         if col not in X.columns or col not in X_train_all.columns:
             continue
-        user_value = X[col].values[0]
-        unique_values = X_train_all[col].unique()
-
-        if X[col].dtype == 'object' and user_value not in unique_values:
-            unseen_cols.append(col)
+        user_value = X[col].iloc[0]
+        if X[col].dtype == 'object' or isinstance(user_value, str):
+            norm_user = _norm_obj(user_value)
+            train_uni = _unique_normalized(X_train_all[col])
+            if norm_user not in train_uni:
+                unseen_cols.append(col)
 
 if unseen_cols:
-    st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฏในการฝึกโมเดล: {', '.join(unseen_cols)}")
-
+    st.warning(f"⚠️ ค่าต่อไปนี้ไม่เคยปรากฏในการฝึกโมเดล (หลัง normalize): {', '.join(unseen_cols)}")
 
 # ---------- Predict ----------
 if st.button("Predict Price (ล้านบาท)"):
@@ -415,20 +551,54 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # ===== คำนวณ Confidence (numeric-only percentile) =====
+        # ===== Conformal Prediction Intervals =====
+        if conformal_ready and conformal_info is not None:
+            q90, q95 = conformal_info["q90"], conformal_info["q95"]
+            pi90 = (pred_val - q90, pred_val + q90)
+            pi95 = (pred_val - q95, pred_val + q95)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption("Prediction Interval 90%")
+                st.success(f"[{pi90[0]:.3f} , {pi90[1]:.3f}] ล้านบ.")
+            with c2:
+                st.caption("Prediction Interval 95%")
+                st.info(f"[{pi95[0]:.3f} , {pi95[1]:.3f}] ล้านบ.")
+        else:
+            st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
+
+        # ===== Hybrid Confidence =====
         if conf_ready:
             try:
-                conf = confidence_numeric_percentile(
-                    X, scaler_num, Xt_scaled_train, dist_ref_01,
-                    NUM_ONLY, top_k=10
+                num_conf = confidence_numeric_percentile(
+                    X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
+                    NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train))
                 )
-                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{conf*100:.1f} %")
+                cat_conf = cat_similarity_percentile(
+                    X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
+                )
+                HYBRID_ALPHA = 0.6  # ถ่วง numeric มากกว่านิด
+                conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
+
+                st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
                 if conf >= 0.9:
                     st.success("✅ คล้ายข้อมูลฝึกมาก")
                 elif conf >= 0.7:
                     st.info("ℹ️ ใกล้เคียงพอสมควร")
                 else:
                     st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
+                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
+                        dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
+                        if dr:
+                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (ค่า |z| สูง):")
+                            st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
+                        cat_miss = []
+                        for c in CAT_FOR_CONF:
+                            if c in X.columns and c in X_train_all.columns:
+                                if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
+                                    cat_miss.append(c)
+                        if cat_miss:
+                            st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(cat_miss))
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
@@ -436,6 +606,8 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
