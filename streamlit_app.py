@@ -212,7 +212,44 @@ try:
 except:
     st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
     X_train_all = None
+# ใส่ไว้ตอนโหลดแอป (หลังโหลด X_train_all)
+NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np, pandas as pd
+
+# 1) เตรียมสเกลจาก train-only (เฉพาะคอลัมน์ตัวเลข)
+def _fit_numeric_scaler(X_train_all, num_cols=NUM_ONLY):
+    Xt = X_train_all[num_cols].copy().astype(float)
+    scaler = StandardScaler().fit(Xt)
+    Xt_scaled = scaler.transform(Xt)
+    return scaler, Xt_scaled  # เก็บ Xt_scaled ไว้ใช้คำนวณ distribution
+
+# 2) สร้าง distribution ของ "ความคล้ายภายใน train" (top-k เฉลี่ย)
+def _train_similarity_distribution(Xt_scaled, top_k=10):
+    # cosine กับตัวเอง แล้วตัดค่าทะแยงออก (ไม่เทียบตัวเอง)
+    sim = cosine_similarity(Xt_scaled)
+    np.fill_diagonal(sim, -np.inf)
+    # เอาค่าเฉลี่ยของ top-k เพื่อนบ้านที่ใกล้สุดสำหรับแต่ละแถว
+    topk_mean = np.mean(np.sort(sim, axis=1)[:, -top_k:], axis=1)
+    # map เป็นช่วง [0,1] (cosine เป็น [-1,1])
+    topk_mean_01 = (topk_mean + 1.0) / 2.0
+    return topk_mean_01  # ใช้เป็นฐานเปอร์เซ็นไทล์
+
+# 3) คำนวณ confidence สำหรับอินพุตใหม่ → คืนค่าเปอร์เซ็นไทล์ (0..1)
+def confidence_numeric_percentile(X_input, scaler, Xt_scaled_train, dist_ref_01, num_cols=NUM_ONLY, top_k=10):
+    x = X_input[num_cols].copy().astype(float)
+    x_scaled = scaler.transform(x)
+    sim = cosine_similarity(Xt_scaled_train, x_scaled).ravel()
+    topk_mean = np.mean(np.sort(sim)[-top_k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+    # เปอร์เซ็นไทล์เทียบกับ distribution ของ train
+    pct = float((dist_ref_01 <= conf_01).mean())
+    return pct  # ใช้เป็น confidence
+# สร้างครั้งเดียวตอนเริ่มแอป (หลังโหลด X_train_all)
+scaler_num, Xt_scaled_train = _fit_numeric_scaler(X_train_all, NUM_ONLY)
+dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=10)
 
 # ---------- UI ----------
 st.title("🏢 Condo Price Predictor")
@@ -424,13 +461,14 @@ if st.button("Predict Price (ล้านบาท)"):
                 k = min(5, len(sim))
                 confidence = float(np.mean(np.sort(sim)[-k:]))
 
-                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{confidence * 100:.1f} %")
-                if confidence >= 0.9:
-                    st.success("✅ ข้อมูลคล้ายกับที่โมเดลเคยเห็น → เชื่อมั่นได้สูง")
-                elif confidence >= 0.7:
-                    st.info("ℹ️ ข้อมูลใกล้เคียง → น่าเชื่อถือปานกลาง")
+                conf = confidence_numeric_percentile(X, scaler_num, Xt_scaled_train, dist_ref_01, NUM_ONLY, top_k=10)
+                st.metric("ความมั่นใจของโมเดล (Confidence)", f"{conf*100:.1f} %")
+                if conf >= 0.9:
+                    st.success("✅ คล้ายข้อมูลฝึกมาก")
+                elif conf >= 0.7:
+                    st.info("ℹ️ ใกล้เคียงพอสมควร")
                 else:
-                    st.warning("⚠️ ข้อมูลแตกต่าง → ระวัง โมเดลอาจไม่แม่น")
+                    st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
 
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
@@ -439,6 +477,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
