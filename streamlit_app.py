@@ -556,11 +556,11 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # ===== Conformal Prediction Intervals =====
-        if conformal_ready and conformal_info is not None:
-            q90, q95 = conformal_info["q90"], conformal_info["q95"]
-            pi90 = (pred_val - q90, pred_val + q90)
-            pi95 = (pred_val - q95, pred_val + q95)
+# ===== Conformal Prediction Intervals =====
+    if conformal_ready and conformal_info is not None:
+        q90, q95 = conformal_info["q90"], conformal_info["q95"]
+        pi90 = (pred_val - q90, pred_val + q90)
+        pi95 = (pred_val - q95, pred_val + q95)
 
             c1, c2 = st.columns(2)
             with c1:
@@ -571,41 +571,30 @@ if st.button("Predict Price (ล้านบาท)"):
                 st.info(f"[{pi95[0]:.3f} , {pi95[1]:.3f}] ล้านบ.")
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
-
-        # ===== Hybrid Confidence =====
-        if conf_ready:
-            try:num_conf = confidence_numeric_percentile(X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train)))
-                cat_conf = cat_similarity_percentile(X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train)))
-                HYBRID_ALPHA = 0.6
-                conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
-
-
-                st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
-                if conf >= 0.9:
-                    st.success("✅ คล้ายข้อมูลฝึกมาก")
-                elif conf >= 0.7:
-                    st.info("ℹ️ ใกล้เคียงพอสมควร")
-                else:
-                    st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
-                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
-                        dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
-                        if dr:
-                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (ค่า |z| สูง):")
-                            st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
-                        cat_miss = []
-                        for c in CAT_FOR_CONF:
-                            if c in X.columns and c in X_train_all.columns:
-                                if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
-                                    cat_miss.append(c)
-                        if cat_miss:
-                            st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(cat_miss))
-            except Exception as e:
-                st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+    # ===== Hybrid Confidence =====
+    if conf_ready:
+        try:
+            num_conf = confidence_numeric_percentile(
+                X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
+                NUM_ONLY, top_k=_auto_top_k(len(Xt_scaled_train))
+            )
+            cat_conf = cat_similarity_percentile(
+                X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
+            )
+            HYBRID_ALPHA = 0.6
+            conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
+            st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
+            if conf >= 0.9:
+                st.success("✅ คล้ายข้อมูลฝึกมาก")
+            elif conf >= 0.7:
+                st.info("ℹ️ ใกล้เคียงพอสมควร")
+            else:
+                st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
+        except Exception as e:
+            st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
             st.warning("⚠️ ไม่พบ X_train.pkl หรือข้อมูล train ไม่พร้อม — จึงไม่แสดง Confidence")
 
-    except Exception as e:
-        st.error(f"ทำนายไม่สำเร็จ: {e}")
 
 
 
