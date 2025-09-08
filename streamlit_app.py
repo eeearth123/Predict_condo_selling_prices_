@@ -165,9 +165,6 @@ row = {
     "Street": street,
     "Zone": zone,
     "Room_Type_Base": room_type_base,
-    "is_pool_access": int(is_pool_access),
-    "is_corner": int(is_corner),
-    "is_high_ceiling": int(is_high_ceiling),
 }
 
 # ✅ แล้วค่อยสร้าง DataFrame X
@@ -227,6 +224,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
