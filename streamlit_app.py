@@ -25,6 +25,70 @@ PIPELINE_FILE = "pipeline.pkl"
 
 
 # ---------- Helpers ----------
+import re
+
+def _norm_txt(s):
+    if s is None: return ""
+    s = str(s).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _top_counts(series, topk=5):
+    vc = series.dropna().astype(str).str.strip().value_counts()
+    return [(z, int(c)) for z, c in vc.head(topk).items()]
+
+def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
+    """คืน list ของ (label, df_filtered) ตามลำดับความจำเพาะ → กว้าง"""
+    steps = []
+    # ใช้ .str.lower().str.strip() เทียบแบบ normalize
+    def _match(col, val):
+        return df[col].astype(str).str.strip().str.lower() == _norm_txt(val)
+
+    if street:
+        df4 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict) & _match("Street", street)]
+        steps.append(("prov+dist+sub+street", df4))
+    if subdistrict:
+        df3 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict)]
+        steps.append(("prov+dist+sub", df3))
+    if district:
+        df2 = df[_match("Province", province) & _match("District", district)]
+        steps.append(("prov+dist", df2))
+    if province:
+        df1 = df[_match("Province", province)]
+        steps.append(("prov", df1))
+    return steps
+
+def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zone=None, topk=5):
+    """
+    คืน (best_zone, candidates:list[(zone,count)], picked_from:str)
+    - ใช้ xtrain_df['Zone'] เป็นฐานโหวต
+    - ถ้าไม่เจอเลยจะ fallback ที่ street_to_zone
+    """
+    best_zone = ""
+    candidates = []
+    picked_from = ""
+
+    # 1) ลองโหวตจากข้อมูลฝึก (ตาม chain: แคบ → กว้าง)
+    if xtrain_df is not None and "Zone" in xtrain_df.columns:
+        for tag, dff in _filter_chain(xtrain_df, province, district, subdistrict, street):
+            if len(dff):
+                cands = _top_counts(dff["Zone"], topk=topk)
+                if cands:
+                    best_zone = cands[0][0]
+                    candidates = cands
+                    picked_from = tag
+                    break
+
+    # 2) fallback: mapping จากถนน
+    if not best_zone and street_to_zone is not None:
+        z = street_to_zone.get(street, "")
+        if z:
+            best_zone = z
+            candidates = [(z, 0)]
+            picked_from = "street_mapping"
+
+    return best_zone, candidates, picked_from
+
 def month_to_sin_cos(m: int):
     rad = 2 * math.pi * (m - 1) / 12.0
     return math.sin(rad), math.cos(rad)
@@ -184,9 +248,57 @@ subdistrict = flexible_selectbox("แขวง/ตำบล - Subdistrict", DIST
 street = flexible_selectbox("ถนน - Street", SUB_TO_STREET.get(subdistrict, []))
 
 
-# 🌐 Zone (auto from street)
-zone = STREET_TO_ZONE.get(street, "")
-st.text_input("Zone (auto)", value=zone)
+# 🌐 Zone (auto) — ใช้ทั้ง Province/District/Subdistrict/Street + โหวตจาก X_train
+if X_train_all is not None and isinstance(X_train_all, pd.DataFrame):
+    try:
+        # บังคับคอลัมน์ให้ครบก่อน (กัน key error)
+        needed = ["Province","District","Subdistrict","Street","Zone"]
+        xtrain_geo = X_train_all.copy()
+        for c in needed:
+            if c not in xtrain_geo.columns:
+                xtrain_geo[c] = ""
+
+        zone_guess, zone_cands, picked_from = guess_zone(
+            province=province,
+            district=district,
+            subdistrict=subdistrict,
+            street=street,
+            xtrain_df=xtrain_geo,
+            street_to_zone=STREET_TO_ZONE,
+            topk=6
+        )
+
+        # ทำตัวเลือก: เอา best ขึ้นก่อน แล้วตามด้วย candidates อื่น ๆ และ "อื่น ๆ (พิมพ์เอง)"
+        options = []
+        if zone_guess: options.append(zone_guess)
+        for z, _cnt in zone_cands:
+            if z and z not in options:
+                options.append(z)
+        # เพิ่ม fallback จาก mapping ถนนถ้ายังไม่มี
+        z_map = STREET_TO_ZONE.get(street, "")
+        if z_map and z_map not in options:
+            options.append(z_map)
+        options.append("อื่น ๆ (พิมพ์เอง)")
+
+        zone_choice = st.selectbox("Zone (auto, ปรับได้)", options=options, index=0)
+        if zone_choice == "อื่น ๆ (พิมพ์เอง)":
+            zone = st.text_input("พิมพ์ Zone เอง", value=zone_guess or z_map or "")
+        else:
+            zone = zone_choice
+
+        # แสดง hint แหล่งที่มาและอันดับโหวต
+        with st.expander("ดูเหตุผลการเดา Zone", expanded=False):
+            st.write(f"picked_from: **{picked_from or 'fallback'}**")
+            if zone_cands:
+                st.write("Top zones ใกล้เคียงจากข้อมูลฝึก:")
+                st.table(pd.DataFrame(zone_cands, columns=["Zone","Count"]))
+    except Exception as e:
+        st.warning(f"เดา Zone อัตโนมัติไม่ได้: {e}")
+        zone = st.text_input("Zone (manual)", value=STREET_TO_ZONE.get(street,""))
+else:
+    # ถ้ายังไม่มี X_train → fallback ตามถนนเหมือนเดิม แต่ให้แก้ไขได้
+    zone = st.text_input("Zone (auto from street / editable)", value=STREET_TO_ZONE.get(street, ""))
+
 
 
 
@@ -327,6 +439,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
