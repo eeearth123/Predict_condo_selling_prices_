@@ -679,7 +679,7 @@ if st.button("Predict Price (ล้านบาท)"):
                 )
 
                 # ① ลดน้ำหนัก numeric ให้ไม่กดค่ามากเกินไป
-                HYBRID_ALPHA = 0.3   # เดิม 0.6
+                HYBRID_ALPHA = 0.2   # เดิม 0.6
                 conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
 
                 # ② ถ้ามีหมวดหมู่ที่ไม่เคยพบใน training → ลดคะแนนเล็กน้อย (penalty)
@@ -717,6 +717,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
