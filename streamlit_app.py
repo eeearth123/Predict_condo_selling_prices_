@@ -224,9 +224,37 @@ except:
     X_train_all = None
 # ===== Confidence (numeric-only percentile) setup =====
 NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
+# ---------- Load y_train for Conformal ----------
+y_train_all = None
+try:
+    if os.path.exists("y_train.pkl"):
+        y_train_all = joblib.load("y_train.pkl")
+    elif os.path.exists("y_train.npy"):
+        y_train_all = np.load("y_train.npy")
+except Exception as e:
+    st.sidebar.warning(f"โหลด y_train ไม่สำเร็จ: {e}")
+    y_train_all = None
 
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics.pairwise import cosine_similarity
+# ตรวจความสอดคล้องระหว่าง X_train_all และ y_train_all
+def _align_Xy_for_conformal(Xt: pd.DataFrame, y):
+    import numpy as np, pandas as pd
+    if Xt is None or y is None:
+        return None, None
+    y = pd.Series(y)
+    # ถ้า index ตรงกัน ใช้ index ร่วม
+    if isinstance(y.index, type(Xt.index)) and (Xt.index.equals(y.index)):
+        return Xt, y
+    # ถ้าไม่ตรง: ใช้ความยาวขั้นต่ำ (กัน shape mismatch)
+    n = min(len(Xt), len(y))
+    if n == 0:
+        return None, None
+    Xt2 = Xt.iloc[:n].copy()
+    y2 = y.iloc[:n].copy().reset_index(drop=True)
+    Xt2.reset_index(drop=True, inplace=True)
+    return Xt2, y2
+
+Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
+
 
 def _fit_numeric_scaler(X_train_all, num_cols=NUM_ONLY):
     Xt = X_train_all.copy()
@@ -349,57 +377,51 @@ def _dimension_drift_report(X_train_all, X_input_one, num_cols=NUM_ONLY, topn=3)
     for c in z.index[:topn]:
         rep.append((c, float(z[c]), float(x[c])))
     return rep
-# ---------- Conformal Prediction (Split Conformal) ----------
+# ---------- Conformal Calibration ----------
 def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
-    # คำนวณ quantile แบบ conformal: (1 - alpha) * (1 + 1/n)
     n = len(residuals)
-    q = np.quantile(residuals, min(1.0, (1 - alpha) * (1 + 1.0 / max(1, n))), method="higher")
+    if n <= 0:
+        return float("nan")
+    # split-conformal correction: (1 - alpha)*(1 + 1/n)
+    q = np.quantile(residuals, min(1.0, (1 - alpha) * (1 + 1.0 / n)), method="higher")
     return float(q)
 
 def fit_conformal_from_calib(pipeline, X_train_df, y_train_arr, calib_frac=0.2, seed=42):
-    """ไม่ train โมเดลใหม่ ใช้โมเดลที่โหลดมาแล้ว → สุ่มแบ่ง calibration set เพื่อสร้าง residual distribution"""
-    if len(X_train_df) != len(y_train_arr):
-        raise ValueError("X_train และ y_train ต้องมีจำนวนแถวเท่ากันสำหรับ conformal")
-
     rng = np.random.RandomState(seed)
     idx = np.arange(len(X_train_df))
     rng.shuffle(idx)
-    n_cal = max(50, int(len(idx) * calib_frac))  # อย่างน้อย 50 แถว
+    n_cal = max(50, int(len(idx) * calib_frac))
     calib_idx = idx[:n_cal]
-
     Xc = X_train_df.iloc[calib_idx].copy()
     yc = np.asarray(y_train_arr)[calib_idx]
 
-    # ให้แน่ใจว่าคอลัมน์ครบและเรียงแบบเดียวกับตอนทำนาย
+    # ให้คอลัมน์ครบเหมือนทำนายจริง
     Xc = ensure_columns(Xc, ALL_FEATURES, fill_value_map=None)
 
     yhat_c = np.ravel(pipeline.predict(Xc))
     resid = np.abs(yc - yhat_c)
 
-    q90 = _conformal_quantile(resid, alpha=0.10)
-    q95 = _conformal_quantile(resid, alpha=0.05)
-    return {"q90": q90, "q95": q95, "n_calib": int(n_cal)}
-conformal_ready = False
-conformal_info = None
-try:
-    # รองรับทั้ง .pkl / .npy (ถ้าอยากใช้ .csv ให้โหลดเป็น Series เอง)
-    if os.path.exists("y_train.pkl"):
-        y_train_all = joblib.load("y_train.pkl")
-    elif os.path.exists("y_train.npy"):
-        y_train_all = np.load("y_train.npy")
-    else:
-        y_train_all = None
+    return {
+        "q90": _conformal_quantile(resid, 0.10),
+        "q95": _conformal_quantile(resid, 0.05),
+        "n_calib": int(len(resid)),
+    }
 
-    if y_train_all is not None and X_train_all is not None and isinstance(X_train_all, pd.DataFrame):
-        # บังคับให้ X_train_all มีคอลัมน์ครบ
-        Xt_full = ensure_columns(X_train_all, ALL_FEATURES, fill_value_map=None)
-        conformal_info = fit_conformal_from_calib(pipeline, Xt_full, y_train_all, calib_frac=0.2, seed=42)
+conformal_ready, conformal_info = False, None
+try:
+    if Xt_for_conf is not None and y_for_conf is not None:
+        Xt_full = ensure_columns(Xt_for_conf, ALL_FEATURES, fill_value_map=None)
+        conformal_info = fit_conformal_from_calib(pipeline, Xt_full, y_for_conf, calib_frac=0.2, seed=42)
         conformal_ready = True
-        st.sidebar.success(f"Conformal ready: calib_n={conformal_info['n_calib']}")
+        st.sidebar.success(
+            f"Conformal ready ✅ | calib_n={conformal_info['n_calib']}, "
+            f"q90={conformal_info['q90']:.3f}, q95={conformal_info['q95']:.3f}"
+        )
     else:
-        st.sidebar.warning("⚠️ ไม่พบ y_train.pkl / y_train.npy → ยังไม่สามารถคำนวณช่วงคาดการณ์ (PI) ได้")
+        st.sidebar.warning("⚠️ Conformal ยังไม่พร้อม (Xt/y ว่างหรือยาวไม่พอ)")
 except Exception as e:
     st.sidebar.warning(f"ตั้งค่า Conformal ไม่สำเร็จ: {e}")
+
 
 
 # ---------- UI ----------
@@ -557,10 +579,11 @@ if st.button("Predict Price (ล้านบาท)"):
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
         # ===== Conformal Prediction Intervals =====
-        if conformal_ready and conformal_info is not None:
+        if conformal_ready and (conformal_info is not None):
             q90, q95 = conformal_info["q90"], conformal_info["q95"]
-            pi90 = (pred_val - q90, pred_val + q90)
-            pi95 = (pred_val - q95, pred_val + q95)
+            # กันค่าติดลบ (ราคาไม่ควรต่ำกว่า 0)
+            pi90 = (max(0.0, pred_val - q90), max(0.0, pred_val + q90))
+            pi95 = (max(0.0, pred_val - q95), max(0.0, pred_val + q95))
 
             c1, c2 = st.columns(2)
             with c1:
@@ -586,12 +609,25 @@ if st.button("Predict Price (ล้านบาท)"):
                 conf = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
 
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf*100:.1f} %")
-                if conf >= 0.9:
+
+                # Diagnostic ถ้าคะแนนต่ำ
+                if conf < 0.7:
+                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
+                        dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
+                        if dr:
+                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score สูง):")
+                            st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
+                        cat_miss = []
+                        for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]:
+                            if c in X.columns and c in X_train_all.columns:
+                                if _norm_obj(X.iloc[0][c]) not in _unique_normalized(X_train_all[c]):
+                                    cat_miss.append(c)
+                        if cat_miss:
+                            st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(cat_miss))
+                elif conf >= 0.9:
                     st.success("✅ คล้ายข้อมูลฝึกมาก")
-                elif conf >= 0.7:
-                    st.info("ℹ️ ใกล้เคียงพอสมควร")
                 else:
-                    st.warning("⚠️ ค่อนข้างต่างจากข้อมูลฝึก")
+                    st.info("ℹ️ ใกล้เคียงพอสมควร")
             except Exception as e:
                 st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
         else:
@@ -599,6 +635,8 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
+
 
 
 
