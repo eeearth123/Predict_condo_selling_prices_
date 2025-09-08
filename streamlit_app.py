@@ -428,7 +428,9 @@ if X_train_all is not None and isinstance(X_train_all, pd.DataFrame) and len(X_t
     dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=TOPK_REF)
 
     # Categorical encoder สำหรับ hybrid (เหมือนเดิม)
+    # Categorical encoder สำหรับ Hybrid
     cat_enc, X_cat_train = _fit_cat_encoder(X_train_all, CAT_FOR_CONF)
+
 
     conf_ready = True
 
@@ -547,6 +549,61 @@ try:
         st.sidebar.warning("⚠️ Conformal ยังไม่พร้อม (Xt/y ว่างหรือยาวไม่พอ)")
 except Exception as e:
     st.sidebar.warning(f"ตั้งค่า Conformal ไม่สำเร็จ: {e}")
+# ===== Categorical encoder + similarity for Hybrid Confidence =====
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import pandas as pd
+
+# คอลัมน์หมวดหมู่ที่ใช้คำนวณความคล้ายเชิงหมวดหมู่
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
+
+def _fit_cat_encoder(X_train_all: pd.DataFrame, cat_cols=CAT_FOR_CONF):
+    """ฟิต OneHotEncoder บนคอลัมน์หมวดหมู่จาก X_train_all และคืน (encoder, X_cat_train_encoded)"""
+    Xt = X_train_all.copy()
+    # เติมคอลัมน์ที่หายไปด้วยค่าว่าง เพื่อกัน KeyError
+    for c in cat_cols:
+        if c not in Xt.columns:
+            Xt[c] = ""
+    enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    enc.fit(Xt[cat_cols].astype(str))
+    X_cat_train = enc.transform(Xt[cat_cols].astype(str)).astype(float)
+    return enc, X_cat_train
+
+def _topk_mean_self_distribution(mat: np.ndarray, top_k: int = 10) -> np.ndarray:
+    """แจกแจงอ้างอิง: ค่าเฉลี่ย similarity ของ top-k เพื่อนบ้านของแต่ละแถวเทียบกับทั้ง train (ตัดทแยง)"""
+    if mat.shape[0] <= 1:
+        return np.array([1.0], dtype=float)
+    sim = cosine_similarity(mat)
+    np.fill_diagonal(sim, -np.inf)
+    topk = np.sort(sim, axis=1)[:, -min(top_k, sim.shape[1]-1):]
+    topk_mean = topk.mean(axis=1)
+    topk_mean_01 = (topk_mean + 1.0) / 2.0
+    return topk_mean_01
+
+def cat_similarity_percentile(
+    X_input: pd.DataFrame,
+    enc: OneHotEncoder,
+    X_cat_train: np.ndarray,
+    cat_cols=CAT_FOR_CONF,
+    top_k: int = 10,
+) -> float:
+    """ความคล้ายเชิงหมวดหมู่แบบ percentile: เปรียบเทียบค่าเฉลี่ย top-k similarity ของ input กับ distribution ของ train"""
+    # เข้ารหัสอินพุต
+    x_cat = X_input.copy()
+    for c in cat_cols:
+        if c not in x_cat.columns:
+            x_cat[c] = ""
+    x_vec = enc.transform(x_cat[cat_cols].astype(str)).astype(float)
+    # similarity กับ train
+    sim = cosine_similarity(X_cat_train, x_vec).ravel()
+    k = min(top_k, len(sim))
+    topk_mean = np.mean(np.sort(sim)[-k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+    # อ้างอิง distribution จาก train self-sim
+    dist_ref_01 = _topk_mean_self_distribution(X_cat_train, top_k=k)
+    pct = float((dist_ref_01 <= conf_01).mean())
+    return pct  # 0..1
 
 
 
@@ -738,8 +795,9 @@ if st.button("Predict Price (ล้านบาท)"):
                 )
                 # categorical part
                 cat_conf = cat_similarity_percentile(
-                    X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
+                X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
                 )
+
                 # ผสม (เลือก rate ได้: 0.2–0.4)
                 HYBRID_ALPHA = 0.25
                 conf_raw = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
@@ -786,6 +844,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
