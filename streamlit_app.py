@@ -149,11 +149,7 @@ room_type_base = st.selectbox("ประเภทห้อง — Room_Type", op
     '3BED_LOFT', '4BED_LOFT', 'DUO', '1BED_TRIPLEX', '1BED_PLUS_TRIPLEX',
     '2BED_TRIPLEX', 'Simplex'])
 
-# ---------- Extra Options ----------
-st.subheader("ลักษณะห้องเพิ่มเติม")
-is_pool_access = st.checkbox("ห้องเชื่อมสระว่ายน้ำ (Pool Access)")
-is_corner = st.checkbox("ห้องมุม (Corner Room)")
-is_high_ceiling = st.checkbox("ห้องเพดานสูง (High Ceiling)")
+
 
 # ✅ สร้าง row ก่อน
 row = {
@@ -231,6 +227,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
