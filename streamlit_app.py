@@ -380,11 +380,27 @@ def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_
 
 
 # ---------- โหลด X_train (สำหรับ Confidence) ----------
+# ---------- Load model ----------
 try:
-    X_train_all = joblib.load("X_train.pkl")
-except:
-    st.warning("⚠️ ไม่พบ X_train.pkl — จะไม่สามารถแสดง Confidence Score ได้")
-    X_train_all = None
+    import two_segment
+    sys.modules['main'] = two_segment   # ให้ pickle หา class TwoSegmentRegressor เจอ
+except Exception:
+    pass
+
+PIPELINE_FILE = "pipeline.pkl"
+
+if not os.path.exists(PIPELINE_FILE):
+    st.error(f"ไม่พบไฟล์ {PIPELINE_FILE} — กรุณาวางไฟล์โมเดลไว้โฟลเดอร์เดียวกับสคริปต์")
+    st.stop()
+
+try:
+    import joblib
+    pipeline = joblib.load(PIPELINE_FILE)
+    st.sidebar.success("โหลด pipeline.pkl สำเร็จ ✅")
+except Exception as e:
+    st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
+    st.stop()
+
 # ===== Confidence (numeric-only percentile) setup =====
 NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 # ---------- Load y_train for Conformal ----------
@@ -895,6 +911,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
