@@ -400,6 +400,11 @@ try:
 except Exception as e:
     st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
     st.stop()
+if Xt_for_conf is None or y_for_conf is None:
+    st.sidebar.warning("⚠️ Conformal ยังไม่พร้อม (X_train/y_train ไม่ครบหรือยาวไม่พอ)")
+else:
+    # ดำเนินการ fit_conformal_from_calib(...) ต่อไป
+
 # ----- Conformal helpers: align X_train and y_train safely -----
 def _align_Xy_for_conformal(Xt, y):
     """ทำให้ X และ y ยาวเท่ากัน เรียงตรงกัน และ reset_index เพื่อกัน shape mismatch
@@ -941,6 +946,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
