@@ -400,6 +400,36 @@ try:
 except Exception as e:
     st.error(f"โหลดโมเดลไม่สำเร็จ: {e}")
     st.stop()
+# ----- Conformal helpers: align X_train and y_train safely -----
+def _align_Xy_for_conformal(Xt, y):
+    """ทำให้ X และ y ยาวเท่ากัน เรียงตรงกัน และ reset_index เพื่อกัน shape mismatch
+       - คืน (Xt_aligned: DataFrame | None, y_aligned: Series | None)
+    """
+    import pandas as pd
+    if Xt is None or y is None:
+        return None, None
+    # ให้ y เป็น Series เสมอ
+    y = pd.Series(y)
+    # ใช้ความยาวขั้นต่ำกัน index เพี้ยน
+    n = min(len(Xt), len(y))
+    if n <= 0:
+        return None, None
+    Xt2 = Xt.iloc[:n].copy().reset_index(drop=True)
+    y2  = y.iloc[:n].copy().reset_index(drop=True)
+    return Xt2, y2
+
+# (แนะนำ) โหลด y_train ถ้ายังไม่ได้โหลด
+try:
+    y_train_all  # มีอยู่แล้วก็ข้าม
+except NameError:
+    try:
+        import joblib, os
+        y_train_all = joblib.load("y_train.pkl") if os.path.exists("y_train.pkl") else None
+    except Exception:
+        y_train_all = None
+
+# จัดแนวก่อนเอาไปใช้ calibrate conformal
+Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
 
 # ===== Confidence (numeric-only percentile) setup =====
 NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
@@ -911,6 +941,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
