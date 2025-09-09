@@ -91,19 +91,21 @@ TwoSegmentRegressor.__module__ = "main"
 # ======== end shim ========
 
 # ---------- Helpers ----------
-import re, math
+import re, math, os, sys
 import numpy as np
 import pandas as pd
+import streamlit as st
+
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 
-# ====== Numeric columns resolver (ไม่พึ่ง NUM_ONLY ตอนประกาศ) ======
+# ===== Numeric columns resolver (ไม่พึ่ง NUM_ONLY ตอนประกาศ) =====
 NUM_ONLY_FALLBACK = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 
 def _resolve_num_cols(df_like=None):
-    """คืนรายชื่อคอลัมน์ตัวเลขที่ใช้คำนวณ:
+    """คืนรายชื่อคอลัมน์ตัวเลข:
        - ถ้ามี NUM_ONLY ใน globals -> ใช้นั้น
        - ไม่งั้นใช้ fallback แล้วกรองให้เหลือเฉพาะคอลัมน์ที่มีจริง (ถ้าส่ง df_like มา)"""
     num_cols = globals().get("NUM_ONLY", NUM_ONLY_FALLBACK)
@@ -111,7 +113,7 @@ def _resolve_num_cols(df_like=None):
         num_cols = [c for c in num_cols if c in df_like.columns]
     return num_cols
 
-# ===== Confidence helpers (rescale + label + numeric-only toggle) =====
+# ===== Confidence helpers (numeric part; log1p ลด outlier) =====
 def _prep_num(df, num_cols=None):
     """เตรียมคอลัมน์ตัวเลขก่อนสเกล (ลด outlier ของ Total_Units ด้วย log1p)"""
     if num_cols is None:
@@ -135,33 +137,36 @@ def _robust_scale_fit_nums(X_num: pd.DataFrame):
 def _robust_scale_transform_nums(X_num: pd.DataFrame, r, s):
     return s.transform(r.transform(X_num))
 
-# Winsorize z-score สำหรับ drift report
+def _auto_top_k(n_train: int):
+    return int(np.clip(np.sqrt(max(1, n_train)), 5, 25))
+
+def _train_similarity_distribution(Xt_scaled: np.ndarray, top_k=10):
+    sim = cosine_similarity(Xt_scaled)
+    np.fill_diagonal(sim, -np.inf)
+    topk_mean = np.mean(np.sort(sim, axis=1)[:, -min(top_k, sim.shape[1]-1):], axis=1)
+    return (topk_mean + 1.0) / 2.0
+
+# ===== Drift report (winsorized z-score) =====
 TOP_Z = 2.0
 def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
     """รายงานคอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด โดย clip z-score ใน [-TOP_Z, TOP_Z]"""
     if num_cols is None:
         num_cols = _resolve_num_cols(X_train_all)
-
     Xt = _prep_num(X_train_all[num_cols], num_cols)
     mu = Xt.mean()
     sd = Xt.std().replace(0, 1.0)
-
     x = _prep_num(X_input_one[num_cols], num_cols).iloc[0]
     z = ((x - mu) / sd).clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
-
-    rep = []
-    for c in z.index[:topn]:
-        rep.append((c, float(z[c]), float(x[c])))
+    rep = [(c, float(z[c]), float(x[c])) for c in z.index[:topn]]
     return rep
 
-# แปลงค่า 0..1 → เรต/ฉลากอ่านง่าย
+# ===== Hybrid Confidence rescale + label =====
 def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     """rescale แบบ affine ให้ช่วงใช้งานอยู่ระหว่าง ~20–85% (ปรับได้)
        คืนค่า (conf_rescaled_0_1, label, icon)"""
     cr = float(conf_raw)
     conf_rescaled = (cr - low) / (high - low)
     conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
-
     if conf_rescaled >= 0.75:
         return conf_rescaled, "เหมือนมาก", "✅"
     elif conf_rescaled >= 0.45:
@@ -169,7 +174,7 @@ def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     else:
         return conf_rescaled, "ต่างเยอะ", "⚠️"
 
-# (ทางเลือก) โชว์ numeric-only confidence แยกเพื่อเทียบ
+# ===== Numeric-only confidence (percentile) =====
 def numeric_only_confidence(X_input, scaler_r, scaler_s, Xt_scaled_train, dist_ref_01, top_k, num_cols=None):
     if num_cols is None:
         num_cols = _resolve_num_cols(X_input)
@@ -182,7 +187,53 @@ def numeric_only_confidence(X_input, scaler_r, scaler_s, Xt_scaled_train, dist_r
     pct = float((dist_ref_01 <= conf_01).mean())
     return pct  # 0..1
 
-# ===== Normalizers / utilities =====
+# ===== Categorical helpers for Hybrid Confidence =====
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
+
+def _fit_cat_encoder(X_train_all: pd.DataFrame, cat_cols=CAT_FOR_CONF):
+    """ฟิต OneHotEncoder บนคอลัมน์หมวดหมู่ของ X_train_all แล้วคืน (encoder, X_cat_train_encoded)"""
+    Xt = X_train_all.copy()
+    for c in cat_cols:
+        if c not in Xt.columns:
+            Xt[c] = ""
+    enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    enc.fit(Xt[cat_cols].astype(str))
+    X_cat_train = enc.transform(Xt[cat_cols].astype(str)).astype(float)
+    return enc, X_cat_train
+
+def _topk_mean_self_distribution(mat: np.ndarray, top_k: int = 10) -> np.ndarray:
+    """แจกแจงอ้างอิง: mean(top-k cosine sim) ของแต่ละแถวเทียบกับ train เอง (ตัดแนวทแยง)"""
+    if mat.shape[0] <= 1:
+        return np.array([1.0], dtype=float)
+    sim = cosine_similarity(mat)
+    np.fill_diagonal(sim, -np.inf)
+    k = min(top_k, sim.shape[1]-1)
+    topk = np.sort(sim, axis=1)[:, -k:]
+    topk_mean = topk.mean(axis=1)
+    return (topk_mean + 1.0) / 2.0
+
+def cat_similarity_percentile(
+    X_input: pd.DataFrame,
+    enc: OneHotEncoder,
+    X_cat_train: np.ndarray,
+    cat_cols=CAT_FOR_CONF,
+    top_k: int = 10,
+) -> float:
+    """ความคล้ายเชิงหมวดหมู่แบบ percentile: mean(top-k cosine sim) ของอินพุต เทียบกับ distribution ของ train"""
+    x_cat = X_input.copy()
+    for c in cat_cols:
+        if c not in x_cat.columns:
+            x_cat[c] = ""
+    x_vec = enc.transform(x_cat[cat_cols].astype(str)).astype(float)
+    sim = cosine_similarity(X_cat_train, x_vec).ravel()
+    k = min(top_k, len(sim))
+    topk_mean = np.mean(np.sort(sim)[-k:])
+    conf_01 = (topk_mean + 1.0) / 2.0
+    dist_ref_01 = _topk_mean_self_distribution(X_cat_train, top_k=k)
+    pct = float((dist_ref_01 <= conf_01).mean())
+    return pct  # 0..1
+
+# ===== Normalizers / text utils =====
 def _norm_obj(x):
     if pd.isna(x): return ""
     return re.sub(r"\s+", " ", str(x).strip().lower())
@@ -200,6 +251,7 @@ def _top_counts(series, topk=5):
     vc = series.dropna().astype(str).str.strip().value_counts()
     return [(z, int(c)) for z, c in vc.head(topk).items()]
 
+# ===== Geo chain & zone guess =====
 def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
     """คืน list ของ (label, df_filtered) ตามลำดับความจำเพาะ → กว้าง"""
     steps = []
@@ -236,7 +288,6 @@ def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zon
                     candidates = cands
                     picked_from = tag
                     break
-
     if not best_zone and street_to_zone is not None:
         z = street_to_zone.get(street, "")
         if z:
@@ -245,6 +296,7 @@ def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zon
             picked_from = "street_mapping"
     return best_zone, candidates, picked_from
 
+# ===== Misc =====
 def month_to_sin_cos(m: int):
     rad = 2 * math.pi * (m - 1) / 12.0
     return math.sin(rad), math.cos(rad)
@@ -262,7 +314,7 @@ def ensure_columns(df: pd.DataFrame, cols: list, fill_value_map: dict = None) ->
             df[c] = fill_value_map.get(c, 0)
     return df[cols]
 
-# ====== UI helper ======
+# ===== UI helper =====
 def flexible_selectbox(label, options):
     """เลือกจาก list หรือพิมพ์เองได้ (return ค่าที่เลือก/พิม)"""
     extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
@@ -273,7 +325,7 @@ def flexible_selectbox(label, options):
     else:
         return choice
 
-# ====== Encoding / confidence backfills ======
+# ===== Encoding / confidence backfills =====
 def _which_side(pipeline, X_one_row):
     """บอกว่าพยากรณ์แถวนี้ใช้ MASS หรือ LUX (fallback ถ้าไม่มี predict_side)"""
     if hasattr(pipeline, "predict_side"):
@@ -293,21 +345,19 @@ def _encode_like_model(pipeline, X_df, cat_cols, side):
     if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
         X_df[cat_cols] = pipeline.mass_encoder.transform(X_df[cat_cols])
         return X_df, "model"
-
     pre = ColumnTransformer([
         ("num", "passthrough", [c for c in X_df.columns if c not in cat_cols]),
         ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
     ])
     enc = Pipeline([("pre", pre)])
-    X_arr = enc.fit_transform(X_df)   # fit บน train+input (ภายนอกต้อง concat ให้เรียงถูกถ้าจะให้คอลัมน์ตรง)
+    X_arr = enc.fit_transform(X_df)   # ถ้าต้องการให้คอลัมน์ตรง ควร fit บน train+input ที่ concat ภายนอก
     X_encoded = pd.DataFrame(X_arr)
     return X_encoded, "onehot"
 
 def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_cols, top_k=5):
-    """คำนวณความคล้ายด้วย cosine บน representation ที่เข้ารหัสแล้ว (มี fallback one-hot)"""
+    """คำนวณความคล้ายด้วย cosine บน representation ที่เข้ารหัสแล้ว (fallback one-hot ได้)"""
     X_train_used = X_train_all.reindex(columns=all_cols).copy()
     X_input = X_input_one.reindex(columns=all_cols).copy()
-
     side = _which_side(pipeline, X_input.iloc[0].to_dict())
 
     X_train_enc, mode1 = _encode_like_model(pipeline, X_train_used, cat_cols, side)
@@ -327,6 +377,7 @@ def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_
     k = min(top_k, len(sim))
     conf = float(np.mean(np.sort(sim)[-k:]))
     return conf
+
 
 # ---------- โหลด X_train (สำหรับ Confidence) ----------
 try:
@@ -844,6 +895,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
