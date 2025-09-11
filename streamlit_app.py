@@ -1,7 +1,7 @@
 # =========================
-# streamlit_app.py (FULL)
+# streamlit_app.py (FULL, Hybrid Confidence v2)
 # =========================
-import os, sys, math, json, warnings
+import os, sys, math, json, warnings, re
 warnings.filterwarnings("ignore")
 
 import joblib
@@ -14,6 +14,8 @@ from sklearn.preprocessing import RobustScaler, StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.neighbors import NearestNeighbors
+from dataclasses import dataclass, field
 
 # ---------- Setup ----------
 st.set_page_config(page_title="Condo Price Predictor", page_icon="🏢", layout="wide")
@@ -33,7 +35,6 @@ YTRAIN_FILE   = "y_train.pkl"
 # =========================================
 # TwoSegmentRegressor shim (for unpickle)
 # =========================================
-from dataclasses import dataclass, field
 
 def _ensure_columns(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     d = df.copy()
@@ -97,7 +98,6 @@ sys.modules['main'] = sys.modules[__name__]
 # ==================
 # ----- Helpers -----
 # ==================
-import re
 
 # Numeric resolver (กันกรณียังไม่ประกาศ NUM_ONLY)
 NUM_ONLY_FALLBACK = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
@@ -132,15 +132,9 @@ def _robust_scale_transform_nums(X_num: pd.DataFrame, r, s):
 def _auto_top_k(n_train: int):
     return int(np.clip(np.sqrt(max(1, n_train)), 5, 25))
 
-def _train_similarity_distribution(Xt_scaled: np.ndarray, top_k=10):
-    sim = cosine_similarity(Xt_scaled)
-    np.fill_diagonal(sim, -np.inf)
-    k = min(top_k, sim.shape[1]-1)
-    topk_mean = np.mean(np.sort(sim, axis=1)[:, -k:], axis=1)
-    return (topk_mean + 1.0) / 2.0
-
 # Drift report (winsorized z-score)
 TOP_Z = 2.0
+
 def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
     if num_cols is None:
         num_cols = _resolve_num_cols(X_train_all)
@@ -152,6 +146,7 @@ def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
     return [(c, float(z[c]), float(x[c])) for c in z.index[:topn]]
 
 # Hybrid rescale + label
+
 def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     cr = float(conf_raw)
     conf_rescaled = (cr - low) / (high - low)
@@ -160,56 +155,8 @@ def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     if conf_rescaled >= 0.45: return conf_rescaled, "ใกล้เคียง", "ℹ️"
     return conf_rescaled, "ต่างเยอะ", "⚠️"
 
-# Numeric-only confidence (percentile)
-def numeric_only_confidence(X_input, scaler_r, scaler_s, Xt_scaled_train, dist_ref_01, top_k, num_cols=None):
-    if num_cols is None:
-        num_cols = _resolve_num_cols(X_input)
-    x_num = _prep_num(X_input[num_cols], num_cols)
-    x_scaled = _robust_scale_transform_nums(x_num, scaler_r, scaler_s)
-    sim = cosine_similarity(Xt_scaled_train, x_scaled).ravel()
-    k = min(top_k, len(sim))
-    topk_mean = np.mean(np.sort(sim)[-k:])
-    conf_01 = (topk_mean + 1.0) / 2.0
-    pct = float((dist_ref_01 <= conf_01).mean())
-    return pct
-
-# Categorical similarity (Hybrid)
-CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
-
-def _fit_cat_encoder(X_train_all: pd.DataFrame, cat_cols=CAT_FOR_CONF):
-    Xt = X_train_all.copy()
-    for c in cat_cols:
-        if c not in Xt.columns: Xt[c] = ""
-    enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    enc.fit(Xt[cat_cols].astype(str))
-    X_cat_train = enc.transform(Xt[cat_cols].astype(str)).astype(float)
-    return enc, X_cat_train
-
-def _topk_mean_self_distribution(mat: np.ndarray, top_k: int = 10) -> np.ndarray:
-    if mat.shape[0] <= 1:
-        return np.array([1.0], dtype=float)
-    sim = cosine_similarity(mat)
-    np.fill_diagonal(sim, -np.inf)
-    k = min(top_k, sim.shape[1]-1)
-    topk = np.sort(sim, axis=1)[:, -k:]
-    topk_mean = topk.mean(axis=1)
-    return (topk_mean + 1.0) / 2.0
-
-def cat_similarity_percentile(X_input: pd.DataFrame, enc: OneHotEncoder, X_cat_train: np.ndarray,
-                              cat_cols=CAT_FOR_CONF, top_k: int = 10) -> float:
-    xi = X_input.copy()
-    for c in cat_cols:
-        if c not in xi.columns: xi[c] = ""
-    Xi_cat = enc.transform(xi[cat_cols].astype(str)).astype(float)
-    sim = cosine_similarity(X_cat_train, Xi_cat).ravel()
-    k = min(top_k, len(sim))
-    topk_mean = np.mean(np.sort(sim)[-k:])
-    conf_01 = (topk_mean + 1.0) / 2.0
-    dist_ref_01 = _topk_mean_self_distribution(X_cat_train, top_k=k)
-    pct = float((dist_ref_01 <= conf_01).mean())
-    return pct
-
 # Normalizers / text utils
+
 def _norm_obj(x):
     if pd.isna(x): return ""
     return re.sub(r"\s+", " ", str(x).strip().lower())
@@ -228,6 +175,7 @@ def _top_counts(series, topk=5):
     return [(z, int(c)) for z, c in vc.head(topk).items()]
 
 # Geo chain & zone guess
+
 def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
     steps = []
     def _match(col, val): return df[col].astype(str).str.strip().str.lower() == _norm_txt(val)
@@ -261,6 +209,7 @@ def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zon
     return best_zone, candidates, picked_from
 
 # Misc
+
 def month_to_sin_cos(m: int):
     rad = 2 * math.pi * (m - 1) / 12.0
     return math.sin(rad), math.cos(rad)
@@ -286,7 +235,8 @@ def flexible_selectbox(label, options):
     else:
         return choice
 
-# Encode/Confidence backfills
+# Router helpers
+
 def _which_side(pipeline, X_one_row):
     if hasattr(pipeline, "predict_side"):
         try:
@@ -296,42 +246,75 @@ def _which_side(pipeline, X_one_row):
             pass
     return "LUX" if float(X_one_row.get("Area_sqm", 0)) > 250 else "MASS"
 
-def _encode_like_model(pipeline, X_df, cat_cols, side):
-    X_df = X_df.copy()
-    if side == "LUX" and hasattr(pipeline, "lux_encoder") and pipeline.lux_encoder is not None:
-        X_df[cat_cols] = pipeline.lux_encoder.transform(X_df[cat_cols]); return X_df, "model"
-    if side == "MASS" and hasattr(pipeline, "mass_encoder") and pipeline.mass_encoder is not None:
-        X_df[cat_cols] = pipeline.mass_encoder.transform(X_df[cat_cols]); return X_df, "model"
-    pre = ColumnTransformer([
-        ("num", "passthrough", [c for c in X_df.columns if c not in cat_cols]),
-        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), cat_cols),
-    ])
-    enc = Pipeline([("pre", pre)])
-    X_arr = enc.fit_transform(X_df)
-    X_encoded = pd.DataFrame(X_arr)
-    return X_encoded, "onehot"
+# ===== New: Similarity-based Confidence (RBF+Categorical) =====
+CONF_PARAMS = {
+    "k_num": 50,      # k เพื่อนบ้านสำหรับฝั่งตัวเลข
+    "tau": None,      # ถ้า None จะใช้ median(d^2) ของ k เพื่อนบ้าน
+    "wN": 0.6,        # น้ำหนักฝั่งตัวเลข
+    "wC": 0.4,        # น้ำหนักฝั่งหมวดหมู่ (wN+wC=1)
+    "alpha": 0.7,     # โทษ unseen ต่อคอลัมน์ (1-alpha = match score เมื่อ unseen)
+    "m": 20.0,        # smoothing ของ coverage (จำนวนเคสขั้นต่ำก่อนเชื่อค่า)
+    "beta": 1.0,      # โทษ unseen รวมตามสัดส่วนคอลัมน์ที่ unseen
+    "lam": 0.05,      # ฐานความมั่นใจขั้นต่ำ
+    "gamma": 2.0,     # ความโค้ง (ยิ่งมากยิ่งแยกแรง)
+    "cmin": 0.05,     # clip ต่ำสุดหลังคูณ base_conf
+    "cmax": 0.99,     # clip สูงสุด
+    "base_conf": 0.80 # ฐานความมั่นใจโดยรวมของโมเดล
+}
 
-def compute_confidence_robust(pipeline, X_train_all, X_input_one, all_cols, cat_cols, top_k=5):
-    X_train_used = X_train_all.reindex(columns=all_cols).copy()
-    X_input = X_input_one.reindex(columns=all_cols).copy()
-    side = _which_side(pipeline, X_input.iloc[0].to_dict())
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
 
-    X_train_enc, mode1 = _encode_like_model(pipeline, X_train_used, cat_cols, side)
-    if mode1 == "model":
-        X_input_enc, _ = _encode_like_model(pipeline, X_input, cat_cols, side)
-    else:
-        combo = pd.concat([X_train_used, X_input], axis=0)
-        X_combo_enc, _ = _encode_like_model(pipeline, combo, cat_cols, side)
-        X_train_enc = X_combo_enc.iloc[:-1, :].reset_index(drop=True)
-        X_input_enc = X_combo_enc.iloc[-1:, :].reset_index(drop=True)
+def _rbf_numeric_similarity(x_scaled: np.ndarray, Z_train: np.ndarray, k=50, tau=None):
+    k = int(min(max(1, k), len(Z_train)))
+    nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
+    nn.fit(Z_train)
+    dists, _ = nn.kneighbors(x_scaled.reshape(1,-1), return_distance=True)
+    d2 = (dists[0] ** 2)
+    if tau is None:
+        med = np.median(d2)
+        tau = med if med > 0 else (np.mean(d2) + 1e-9)
+    return float(np.mean(np.exp(-d2 / tau)))
 
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train_enc)
-    X_new_scaled = scaler.transform(X_input_enc)
+def _build_counts_per_feature(X_train_all: pd.DataFrame, cat_cols: list):
+    counts = []
+    Xc = X_train_all.copy()
+    for c in cat_cols:
+        if c not in Xc.columns:
+            Xc[c] = ""
+        vc = Xc[c].astype(str).str.strip().value_counts(dropna=False)
+        counts.append(vc.to_dict())
+    return counts
 
-    sim = cosine_similarity(X_train_scaled, X_new_scaled).ravel()
-    k = min(top_k, len(sim))
-    return float(np.mean(np.sort(sim)[-k:]))
+def _categorical_similarity(x_row: pd.Series, counts_per_feature: list, cat_cols: list, alpha=0.7, m=20.0, wC=None):
+    values = [str(x_row.get(c, "")).strip() for c in cat_cols]
+    q = len(cat_cols)
+    if q == 0:
+        return 1.0, 0.0
+    if wC is None:
+        wC = np.ones(q) / q
+
+    s_total = 0.0
+    unseen = 0
+    for j, (val, cnts) in enumerate(zip(values, counts_per_feature)):
+        n = cnts.get(val, 0)
+        seen = n > 0
+        c = n / (n + m) if (n + m) > 0 else 0.0
+        match = 1.0 if seen else (1.0 - alpha)
+        s_j = match * c
+        s_total += float(wC[j]) * s_j
+        if not seen:
+            unseen += 1
+
+    unseen_frac = unseen / q
+    return float(s_total), float(unseen_frac)
+
+def _combine_confidence(S_num, S_cat, unseen_frac, params: dict):
+    wN, wC = params["wN"], params["wC"]
+    S = wN * S_num + wC * S_cat
+    S_tilde = S * math.exp(-params["beta"] * unseen_frac)
+    conf = (params["lam"] + (1 - params["lam"]) * S_tilde) ** params["gamma"]
+    conf = conf * params["base_conf"]
+    return float(np.clip(conf, params["cmin"], params["cmax"])), float(S_tilde)
 
 # ==========================
 # Load model & training data
@@ -374,6 +357,7 @@ except Exception as e:
     y_train_all = None
 
 # Align X/y สำหรับ conformal
+
 def _align_Xy_for_conformal(Xt, y):
     if Xt is None or y is None: return None, None
     y = pd.Series(y)
@@ -391,16 +375,17 @@ Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
 NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 
 conf_ready = False
-cat_enc, X_cat_train = None, None
+r_scaler = s_scaler = None
+Xt_scaled_train = None
+counts_per_feature = None
 try:
     if (X_train_all is not None) and (len(X_train_all) > 0):
         num_cols = _resolve_num_cols(X_train_all)
         Xt_num = _prep_num(X_train_all[num_cols], num_cols)
         r_scaler, s_scaler = _robust_scale_fit_nums(Xt_num)
         Xt_scaled_train = _robust_scale_transform_nums(Xt_num, r_scaler, s_scaler)
-        TOPK_REF = _auto_top_k(len(Xt_scaled_train))
-        dist_ref_01 = _train_similarity_distribution(Xt_scaled_train, top_k=TOPK_REF)
-        cat_enc, X_cat_train = _fit_cat_encoder(X_train_all, CAT_FOR_CONF)
+        # เตรียม categorical counts สำหรับ similarity
+        counts_per_feature = _build_counts_per_feature(X_train_all, CAT_FOR_CONF)
         conf_ready = True
 except Exception as e:
     st.sidebar.warning(f"ตั้งค่า Confidence ไม่สำเร็จ: {e}")
@@ -409,6 +394,7 @@ except Exception as e:
 # ==========================
 # Conformal Calibration
 # ==========================
+
 def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
     n = len(residuals)
     if n <= 0: return float("nan")
@@ -445,6 +431,7 @@ except Exception as e:
 # ==========================
 # ---------- UI ----------
 # ==========================
+
 st.title("🏢 Condo Price Predictor")
 st.caption("กรอกข้อมูล → ทำนายราคาขาย (ล้านบาท) และราคาต่อตารางเมตร (บาท/ตร.ม.)")
 
@@ -506,7 +493,7 @@ if isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
                 st.table(pd.DataFrame(zone_cands, columns=["Zone","Count"]))
     except Exception as e:
         st.warning(f"เดา Zone อัตโนมัติไม่ได้: {e}")
-        zone = st.text_input("Zone (manual)", value=STREET_TO_ZONE.get(street,""))
+        zone = st.text_input("Zone (manual)", value=STREET_TO_ZONE.get(street, ""))
 else:
     zone = st.text_input("Zone (auto from street / editable)", value=STREET_TO_ZONE.get(street, ""))
 
@@ -562,7 +549,7 @@ if st.button("Predict Price (ล้านบาท)"):
         except Exception:
             pass
 
-        # Conformal PI
+        # Conformal PI (keep same)
         if conformal_ready and (conformal_info is not None):
             q90, q95 = conformal_info["q90"], conformal_info["q95"]
             pi90 = (max(0.0, pred_val - q90), max(0.0, pred_val + q90))
@@ -577,43 +564,52 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # Hybrid Confidence
-        if conf_ready:
+        # ===== New Hybrid Confidence (Similarity-based) =====
+        if conf_ready and (counts_per_feature is not None) and (Xt_scaled_train is not None):
             try:
-                num_conf = numeric_only_confidence(
-                    X, r_scaler, s_scaler, Xt_scaled_train, dist_ref_01,
-                    _auto_top_k(len(Xt_scaled_train))
+                # Numeric similarity (RBF on scaled numerics)
+                num_cols = _resolve_num_cols(X_train_all)
+                x_num = _prep_num(X[num_cols], num_cols)
+                x_scaled = _robust_scale_transform_nums(x_num, r_scaler, s_scaler)
+                S_num = _rbf_numeric_similarity(
+                    x_scaled.values[0], Xt_scaled_train,
+                    k=CONF_PARAMS["k_num"], tau=CONF_PARAMS["tau"]
                 )
-                cat_conf = cat_similarity_percentile(
-                    X, cat_enc, X_cat_train, CAT_FOR_CONF, top_k=_auto_top_k(len(X_cat_train))
+
+                # Categorical similarity (+ unseen penalties)
+                S_cat, unseen_frac = _categorical_similarity(
+                    X.iloc[0], counts_per_feature, CAT_FOR_CONF,
+                    alpha=CONF_PARAMS["alpha"], m=CONF_PARAMS["m"]
                 )
-                HYBRID_ALPHA = 0.25
-                conf_raw = HYBRID_ALPHA * num_conf + (1 - HYBRID_ALPHA) * cat_conf
 
-                # Soft penalty สำหรับ unseen
-                if unseen_cols:
-                    conf_raw *= 0.90  # -10%
+                # Combine + Nonlinear mapping to confidence
+                conf_val, S_tilde = _combine_confidence(
+                    S_num, S_cat, unseen_frac, CONF_PARAMS
+                )
 
-                conf_rescaled, conf_label, conf_icon = _rescale_and_label(conf_raw, low=0.20, high=0.85)
+                # Label/report
+                conf_rescaled, conf_label, conf_icon = _rescale_and_label(conf_val, low=0.20, high=0.85)
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf_rescaled*100:.1f} %", help=f"Label: {conf_label}")
-                st.info(f"{conf_icon} ระดับความคล้าย: **{conf_label}**  (raw={conf_raw*100:.1f}%)")
+                st.info(f"{conf_icon} ระดับความคล้าย: **{conf_label}**  (S_num={S_num:.3f}, S_cat={S_cat:.3f}, unseen={unseen_frac:.2f})")
 
-                with st.expander("ดูค่า numeric-only / รายละเอียด (กดเพื่อเปิด)", expanded=False):
-                    st.write(f"Numeric-only confidence: **{num_conf*100:.1f}%**")
-                    st.caption(f"(alpha={HYBRID_ALPHA:.2f}, hybrid_raw={conf_raw*100:.1f}%)")
+                with st.expander("รายละเอียดความคล้าย (กดเพื่อเปิด)", expanded=False):
+                    st.write(f"- Numeric similarity (RBF): **{S_num*100:.1f}%**")
+                    st.write(f"- Categorical similarity: **{S_cat*100:.1f}%**")
+                    st.write(f"- Unseen fraction: **{unseen_frac*100:.1f}%**")
+                    st.caption(f"S_tilde = (wN*S_num + wC*S_cat) * exp(-beta * unseen) = {S_tilde:.3f}")
+                    st.caption(f"params: wN={CONF_PARAMS['wN']}, wC={CONF_PARAMS['wC']}, alpha={CONF_PARAMS['alpha']}, m={CONF_PARAMS['m']}, beta={CONF_PARAMS['beta']}, lam={CONF_PARAMS['lam']}, gamma={CONF_PARAMS['gamma']}")
 
                 if conf_label == "ต่างเยอะ":
-                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (รายละเอียด)", expanded=False):
+                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (numeric drift top-3)", expanded=False):
                         dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
                         if dr:
-                            st.write("คอลัมน์ตัวเลขที่ต่างจาก training มากที่สุด (|z|-score, clipped):")
                             st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
                         if unseen_cols:
                             st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(unseen_cols))
             except Exception as e:
-                st.warning(f"ไม่สามารถคำนวณ confidence ได้: {e}")
+                st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence ได้: {e}")
         else:
-            st.warning("⚠️ ไม่พบ X_train.pkl หรือข้อมูล train ไม่พร้อม — จึงไม่แสดง Confidence")
+            st.warning("⚠️ ข้อมูล train ไม่พร้อม — ยังไม่แสดง Hybrid Confidence")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
