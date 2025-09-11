@@ -309,12 +309,25 @@ def _categorical_similarity(x_row: pd.Series, counts_per_feature: list, cat_cols
     return float(s_total), float(unseen_frac)
 
 def _combine_confidence(S_num, S_cat, unseen_frac, params: dict):
+    """Linear scaling confidence"""
     wN, wC = params["wN"], params["wC"]
     S = wN * S_num + wC * S_cat
     S_tilde = S * math.exp(-params["beta"] * unseen_frac)
-    conf = (params["lam"] + (1 - params["lam"]) * S_tilde) ** params["gamma"]
-    conf = conf * params["base_conf"]
+    # Linear scaling (ไม่ยกกำลัง)
+    conf = params["lam"] + (1 - params["lam"]) * S_tilde
     return float(np.clip(conf, params["cmin"], params["cmax"])), float(S_tilde)
+
+def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
+    """ปรับสเกล + ตี label ใหม่"""
+    cr = float(conf_raw)
+    conf_rescaled = (cr - low) / (high - low)
+    conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
+    if conf_rescaled >= 0.75: 
+        return conf_rescaled, "มั่นใจสูง", "✅"
+    if conf_rescaled >= 0.45: 
+        return conf_rescaled, "ปานกลาง", "ℹ️"
+    return conf_rescaled, "มั่นใจต่ำ", "⚠️"
+
 
 # ==========================
 # Load model & training data
@@ -611,6 +624,7 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
