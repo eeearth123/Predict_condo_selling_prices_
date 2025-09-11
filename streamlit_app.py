@@ -571,7 +571,7 @@ if st.button("Predict Price (ล้านบาท)"):
                 num_cols = _resolve_num_cols(X_train_all)
                 x_num = _prep_num(X[num_cols], num_cols)
                 x_scaled = _robust_scale_transform_nums(x_num, r_scaler, s_scaler)
-                S_num = _rbf_numeric_similarity(x_scaled.values[0], Xt_scaled_train,k=CONF_PARAMS["k_num"], tau=CONF_PARAMS["tau"])
+                S_num = _rbf_numeric_similarity(x_scaled[0], Xt_scaled_train,    # <- แก้ตรงนี้ จาก .values[0] เป็น [0]k=CONF_PARAMS["k_num"], tau=CONF_PARAMS["tau"])
 
 
                 # Categorical similarity (+ unseen penalties)
@@ -611,4 +611,5 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
