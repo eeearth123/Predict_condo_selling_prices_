@@ -1,5 +1,5 @@
 # =========================
-# streamlit_app.py (FULL, Hybrid Confidence v2 + RoomType resolver)
+# streamlit_app.py (RoomType_Group only, no PI)
 # =========================
 import os, sys, math, json, warnings, re
 warnings.filterwarnings("ignore")
@@ -10,8 +10,6 @@ import pandas as pd
 import streamlit as st
 
 from locations_th import PROV_TO_DIST, DIST_TO_SUB, SUB_TO_STREET, STREET_TO_ZONE
-from sklearn.preprocessing import RobustScaler, StandardScaler
-from sklearn.neighbors import NearestNeighbors
 from dataclasses import dataclass, field
 
 # ---------- Setup ----------
@@ -22,15 +20,16 @@ NUM_FEATURES = [
     "Area_sqm", "Project_Age_notreal", "Floors", "Total_Units",
     "Launch_Month_sin", "Launch_Month_cos",
 ] + FLAGS
-CAT_FEATURES = ["Province", "District", "Subdistrict", "Street", "Zone", "Room_Type_Base"]  # default
+# ใช้เฉพาะ RoomType_Group
+CAT_FEATURES = ["Province", "District", "Subdistrict", "Street", "Zone", "RoomType_Group"]
 ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
 
 PIPELINE_FILE = "pipeline.pkl"
 XTRAIN_FILE   = "X_train.pkl"
-YTRAIN_FILE   = "y_train.pkl"
+YTRAIN_FILE   = "y_train.pkl"   # ไม่ใช้ PI แล้ว แต่คงตัวแปรไว้เฉย ๆ
 
-# หมวดหมู่ที่จะใช้คำนวณความมั่นใจแบบความถี่
-CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
+# สำหรับความมั่นใจฝั่งหมวดหมู่
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","RoomType_Group"]
 
 # =========================================
 # TwoSegmentRegressor shim (for unpickle)
@@ -185,7 +184,7 @@ def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zon
     return best_zone, candidates, picked_from
 
 def month_to_sin_cos(m: int):
-    rad = 2 * math.pi (int(m) - 1) / 12.0  # <-- NOTE: will be fixed below
+    rad = 2 * math.pi * (int(m) - 1) / 12.0
     return math.sin(rad), math.cos(rad)
 
 def safe_float(x, default=0.0):
@@ -209,14 +208,8 @@ def flexible_selectbox(label, options):
     else:
         return choice
 
-# 🔧 fix month_to_sin_cos typo (overwrite)
-def month_to_sin_cos(m: int):
-    rad = 2 * math.pi * (int(m) - 1) / 12.0
-    return math.sin(rad), math.cos(rad)
-
 # ===== Quantile-based numeric confidence =====
 def _fit_numeric_quantiles(X_train_all: pd.DataFrame, num_cols: list, qs=(0.05, 0.25, 0.75, 0.95)):
-    """คำนวณ quantiles ต่อฟีเจอร์จากชุดฝึก: P5,P25,P75,P95"""
     Q = {}
     Xt = _prep_num(X_train_all[num_cols], num_cols)
     for c in num_cols:
@@ -229,7 +222,6 @@ def _fit_numeric_quantiles(X_train_all: pd.DataFrame, num_cols: list, qs=(0.05, 
     return Q
 
 def _conf_num_quantile(x_row: pd.Series, Q: dict, num_cols: list):
-    """ให้ความมั่นใจต่อฟีเจอร์ = 1 ใน [P25,P75], ลดเชิงเส้นไป 0.5 ที่ P5/P95, แล้วรวมด้วย geometric mean"""
     eps = 1e-9
     confs = []
     for c in num_cols:
@@ -253,7 +245,6 @@ def _conf_num_quantile(x_row: pd.Series, Q: dict, num_cols: list):
 
 # ===== Frequency-based categorical confidence =====
 def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: float = 5.0):
-    """เก็บ counts/N/K/n_max ต่อคอลัมน์ สำหรับ conf ของหมวดหมู่"""
     stats = []
     Xc = X_train_all.copy()
     for c in cat_cols:
@@ -267,7 +258,6 @@ def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: flo
     return stats
 
 def _conf_cat_from_stats(x_row: pd.Series, cat_stats: list):
-    """conf_j = log(1 + n + alpha) / log(1 + n_max + alpha), รวมด้วย geometric mean"""
     confs = []
     for st_ in cat_stats:
         c = st_["col"]
@@ -312,61 +302,8 @@ except Exception as e:
     st.sidebar.warning(f"โหลด X_train ไม่สำเร็จ: {e}")
     X_train_all = None
 
-y_train_all = None
-try:
-    if os.path.exists(YTRAIN_FILE):
-        y_train_all = joblib.load(YTRAIN_FILE)
-        if isinstance(y_train_all, (pd.DataFrame, pd.Series)):
-            y_train_all = np.asarray(y_train_all).ravel()
-        st.sidebar.info(f"y_train: {len(y_train_all)}")
-    elif os.path.exists("y_train.npy"):
-        y_train_all = np.load("y_train.npy").ravel()
-except Exception as e:
-    st.sidebar.warning(f"โหลด y_train ไม่สำเร็จ: {e}")
-    y_train_all = None
-
-def _align_Xy_for_conformal(Xt, y):
-    if Xt is None or y is None: return None, None
-    y = pd.Series(y)
-    n = min(len(Xt), len(y))
-    if n <= 0: return None, None
-    Xt2 = Xt.iloc[:n].copy().reset_index(drop=True)
-    y2  = y.iloc[:n].copy().reset_index(drop=True)
-    return Xt2, y2
-
-Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
-
 # ==========================
-# RoomType resolver (NEW)
-# ==========================
-def _roomtype_col(df):
-    if isinstance(df, pd.DataFrame):
-        if "Room_Type_Base" in df.columns: return "Room_Type_Base"
-        if "RoomType_Group" in df.columns: return "RoomType_Group"
-    return "RoomType_Group"  # ดีฟอลต์ถ้าไม่รู้ ให้ไปตาม group ใหม่นี้
-
-ROOMTYPE_COL = _roomtype_col(X_train_all)
-
-def _roomtype_vocab(df, colname):
-    if not isinstance(df, pd.DataFrame) or (colname not in df.columns):
-        return set()
-    return set(df[colname].dropna().astype(str).map(_norm_obj).unique())
-
-ROOMTYPE_VOCAB = _roomtype_vocab(X_train_all, ROOMTYPE_COL)
-
-ROOMTYPE_ALIAS = {
-    # UI -> canonical ที่คาดว่าตรงกับเทรน (รองรับเคสตัวพิมพ์เล็ก)
-    "1BEDplus": "1BEDplus", "1bedplus": "1BEDplus",
-    "1BEDduplex": "1BEDduplex", "1bedduplex": "1BEDduplex",
-    "2BEDplus": "2BEDplus", "2bedplus": "2BEDplus",
-    "2BEDduplex": "2BEDduplex", "2bedduplex": "2BEDduplex",
-    "3BEDplus": "3BEDplus", "3bedplus": "3BEDplus",
-    "3BEDduplex": "3BEDduplex", "3bedduplex": "3BEDduplex",
-    # ถ้าเทรนใช้รูปแบบอื่น ให้เพิ่มแมปได้ที่นี่
-}
-
-# ==========================
-# Quantile & Frequency stats (NEW)
+# Confidence stats bootstrap
 # ==========================
 quantiles_per_num = None
 cat_stats_for_conf = None
@@ -378,19 +315,16 @@ try:
         for c in CAT_FOR_CONF:
             if c not in X_train_all.columns:
                 X_train_all[c] = ""
-        # ให้แน่ใจว่ามีคอลัมน์ roomtype ที่ใช้จริงใน CAT_FOR_CONF/ALL_FEATURES
-        if ROOMTYPE_COL not in CAT_FOR_CONF:
-            CAT_FOR_CONF = [z for z in CAT_FOR_CONF if z not in ("Room_Type_Base","RoomType_Group")] + [ROOMTYPE_COL]
         # เตรียมสถิติ
         num_cols = _resolve_num_cols(X_train_all)
         quantiles_per_num = _fit_numeric_quantiles(X_train_all, num_cols)
         cat_stats_for_conf = _fit_categorical_stats(X_train_all, CAT_FOR_CONF, alpha=5.0)
         conf_ready = True
-        st.sidebar.success("Confidence stats (quantiles & categorical frequency) พร้อมใช้งาน ✅")
+        st.sidebar.success("Confidence stats พร้อมใช้งาน ✅")
     else:
-        st.sidebar.warning("⚠️ ไม่มี X_train — ยังทำ confidence แบบใหม่ไม่ได้")
+        st.sidebar.warning("⚠️ ไม่มี X_train — ยังทำ confidence ไม่ได้")
 except Exception as e:
-    st.sidebar.warning(f"ตั้งค่า Quantile/Freq ไม่สำเร็จ: {e}")
+    st.sidebar.warning(f"ตั้งค่า Confidence ไม่สำเร็จ: {e}")
     conf_ready = False
 
 with st.sidebar.expander("Confidence Stats Debug", expanded=False):
@@ -399,47 +333,10 @@ with st.sidebar.expander("Confidence Stats Debug", expanded=False):
         st.write("X_train_all: None")
     else:
         st.write("X_train_all shape:", getattr(X_train_all, "shape", None))
-        st.write("ROOMTYPE_COL:", ROOMTYPE_COL)
-        st.write("Has quantiles_per_num:", quantiles_per_num is not None)
-        st.write("Has cat_stats_for_conf:", cat_stats_for_conf is not None)
+        st.write("Numeric cols:", _resolve_num_cols(X_train_all))
         st.write("CAT_FOR_CONF:", CAT_FOR_CONF)
-
-# ==========================
-# Conformal Calibration
-# ==========================
-def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
-    n = len(residuals)
-    if n <= 0: return float("nan")
-    q = np.quantile(residuals, min(1.0, (1 - alpha) * (1 + 1.0 / n)), method="higher")
-    return float(q)
-
-def fit_conformal_from_calib(pipeline, X_train_df, y_train_arr, calib_frac=0.2, seed=42):
-    rng = np.random.RandomState(seed)
-    idx = np.arange(len(X_train_df))
-    rng.shuffle(idx)
-    n_cal = max(50, int(len(idx) * calib_frac))
-    calib_idx = idx[:n_cal]
-    Xc = X_train_df.iloc[calib_idx].copy()
-    yc = np.asarray(y_train_arr)[calib_idx]
-    Xc = ensure_columns(Xc, ALL_FEATURES, fill_value_map=None)
-    yhat_c = np.ravel(pipeline.predict(Xc))
-    resid = np.abs(yc - yhat_c)
-    return {"q90": _conformal_quantile(resid, 0.10),
-            "q95": _conformal_quantile(resid, 0.05),
-            "n_calib": int(len(resid))}
-
-conformal_ready, conformal_info = False, None
-try:
-    Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
-    if (Xt_for_conf is not None) and (y_for_conf is not None):
-        Xt_full = ensure_columns(Xt_for_conf, ALL_FEATURES, fill_value_map=None)
-        conformal_info = fit_conformal_from_calib(pipeline, Xt_full, y_for_conf, calib_frac=0.2, seed=42)
-        conformal_ready = True
-        st.sidebar.success(f"Conformal ✅ calib_n={conformal_info['n_calib']}, q90={conformal_info['q90']:.3f}, q95={conformal_info['q95']:.3f}")
-    else:
-        st.sidebar.warning("⚠️ Conformal ยังไม่พร้อม (Xt/y ว่างหรือยาวไม่พอ)")
-except Exception as e:
-    st.sidebar.warning(f"ตั้งค่า Conformal ไม่สำเร็จ: {e}")
+        st.write("Has quantiles:", quantiles_per_num is not None)
+        st.write("Has cat_stats:", cat_stats_for_conf is not None)
 
 # ==========================
 # ---------- UI ----------
@@ -510,7 +407,7 @@ else:
     zone = st.text_input("Zone (auto from street / editable)", value=STREET_TO_ZONE.get(street, ""))
 
 # ----------------------
-# RoomType UI (ใช้ตามที่มีจริง) + resolver → match vocab เทรน
+# RoomType UI (ชุดล่าสุด)
 # ----------------------
 roomtype_options = [
     "STUDIO","1BED","1BEDplus","1BEDduplex",
@@ -518,53 +415,32 @@ roomtype_options = [
     "3BED","3BEDplus","3BEDduplex",
     "other"
 ]
-rt_user = st.selectbox("ประเภทห้อง — Room_Type", options=roomtype_options)
-rt_canon = ROOMTYPE_ALIAS.get(rt_user, rt_user)  # map เป็นชื่อที่โมเดลคาด
-rt_norm  = _norm_obj(rt_canon)
+rt_user = st.selectbox("ประเภทห้อง — RoomType_Group", options=roomtype_options)
 
-# ถ้าไม่อยู่ใน vocab เทรน → fallback เป็น 'other' หรือ top-1
-if ROOMTYPE_VOCAB and (rt_norm not in ROOMTYPE_VOCAB):
-    st.warning("ปรับ Room Type เป็น 'other' เนื่องจากรูปแบบนี้ไม่พบใน training")
-    if _norm_obj("other") in ROOMTYPE_VOCAB:
-        rt_canon = "other"
-    else:
-        top1 = (
-            X_train_all[ROOMTYPE_COL]
-            .astype(str).str.strip()
-            .value_counts(dropna=False)
-            .index[0]
-        )
-        rt_canon = str(top1)
+# alias (ถ้าชื่อในเทรนต่างรูปแบบกัน ค่อยเติมที่นี่)
+ROOMTYPE_ALIAS = {
+    "1bedplus":"1BEDplus", "1bedduplex":"1BEDduplex",
+    "2bedplus":"2BEDplus", "2bedduplex":"2BEDduplex",
+    "3bedplus":"3BEDplus", "3bedduplex":"3BEDduplex",
+}
+rt_canon = ROOMTYPE_ALIAS.get(rt_user, rt_user)
 
 # ---------- Build row ----------
 row = {
     "Area_sqm": area, "Project_Age_notreal": age, "Floors": floors, "Total_Units": total_units,
     "Launch_Month_sin": m_sin, "Launch_Month_cos": m_cos,
     "Province": province, "District": district, "Subdistrict": subdistrict, "Street": street,
-    "Zone": zone,
+    "Zone": zone, "RoomType_Group": rt_canon,
     "is_pool_access": 0, "is_corner": 0, "is_high_ceiling": 0,
 }
-# ใส่ roomtype ตามคอลัมน์เทรนจริง
-row[ROOMTYPE_COL] = rt_canon
-
-# เพื่อความเข้ากันได้ ถ้าอีกชื่อยังถูกใช้อยู่ที่อื่น ให้ใส่ทั้งสองคีย์
-if ROOMTYPE_COL == "RoomType_Group":
-    row["Room_Type_Base"] = rt_canon
-elif ROOMTYPE_COL == "Room_Type_Base":
-    row["RoomType_Group"] = rt_canon
-
-# อัพเดต FEATURE LIST ให้สอดคล้องคอลัมน์จริง
-CAT_FEATURES = [c for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base","RoomType_Group"]
-                if (c in (X_train_all.columns if isinstance(X_train_all, pd.DataFrame) else []) ) or (c in row)]
-ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
-
 X = pd.DataFrame([row], columns=ALL_FEATURES)
 
-# Unseen categories (normalized)
+# Unseen categories (normalized) — ตอนนี้จะไม่แตะ Room_Type_Base แล้ว
 unseen_cols = []
 if isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
     for col in ALL_FEATURES:
-        if col not in X.columns or col not in X_train_all.columns: continue
+        if col not in X.columns or col not in X_train_all.columns: 
+            continue
         user_value = X[col].iloc[0]
         if X[col].dtype == 'object' or isinstance(user_value, str):
             norm_user = _norm_obj(user_value)
@@ -586,26 +462,12 @@ if st.button("Predict Price (ล้านบาท)"):
 
         # Router side (optional)
         try:
-            side_label, side_prob = pipeline.predict_side(X)
-            side_txt = side_label[0]
-            st.caption(f"Router side: **{side_txt}**  (P[LUX]={side_prob[0]:.2f})")
+            if hasattr(pipeline, "predict_side"):
+                side_label, side_prob = pipeline.predict_side(X)
+                side_txt = side_label[0]
+                st.caption(f"Router side: **{side_txt}**  (P[LUX]={side_prob[0]:.2f})")
         except Exception:
             pass
-
-        # Conformal PI
-        if conformal_ready and (conformal_info is not None):
-            q90, q95 = conformal_info["q90"], conformal_info["q95"]
-            pi90 = (max(0.0, pred_val - q90), max(0.0, pred_val + q90))
-            pi95 = (max(0.0, pred_val - q95), max(0.0, pred_val + q95))
-            c1, c2 = st.columns(2)
-            with c1:
-                st.caption("Prediction Interval 90%")
-                st.success(f"[{pi90[0]:.3f} , {pi90[1]:.3f}] ล้านบ.")
-            with c2:
-                st.caption("Prediction Interval 95%")
-                st.info(f"[{pi95[0]:.3f} , {pi95[1]:.3f}] ล้านบ.")
-        else:
-            st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
         # ===== Hybrid Confidence (Quantile numeric + Frequency categorical + Geometric mean) =====
         if conf_ready and (quantiles_per_num is not None) and (cat_stats_for_conf is not None):
@@ -627,9 +489,9 @@ if st.button("Predict Price (ล้านบาท)"):
                         if unseen_cols:
                             st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(unseen_cols))
             except Exception as e:
-                st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence (ใหม่) ได้: {e}")
+                st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence ได้: {e}")
         else:
-            st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
+            st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence")
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
