@@ -99,235 +99,90 @@ sys.modules['main'] = sys.modules[__name__]
 # ----- Helpers -----
 # ==================
 
-# Numeric resolver (กันกรณียังไม่ประกาศ NUM_ONLY)
-NUM_ONLY_FALLBACK = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
-def _resolve_num_cols(df_like=None):
-    num_cols = globals().get("NUM_ONLY", NUM_ONLY_FALLBACK)
-    if df_like is not None and hasattr(df_like, "columns"):
-        num_cols = [c for c in num_cols if c in df_like.columns]
-    return num_cols
+# ===== Quantile-based numeric confidence =====
 
-def _prep_num(df, num_cols=None):
-    """เตรียม numeric + log1p(Total_Units)"""
-    if num_cols is None:
-        num_cols = _resolve_num_cols(df)
-    z = df.copy()
-    for c in num_cols:
-        if c not in z.columns:
-            z[c] = 0.0
-    z = z[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    if "Total_Units" in z.columns:
-        z["Total_Units"] = np.log1p(z["Total_Units"])
-    return z
-
-def _robust_scale_fit_nums(X_num: pd.DataFrame):
-    r = RobustScaler().fit(X_num)
-    X_r = r.transform(X_num)
-    s = StandardScaler().fit(X_r)
-    return r, s
-
-def _robust_scale_transform_nums(X_num: pd.DataFrame, r, s):
-    return s.transform(r.transform(X_num))
-
-def _auto_top_k(n_train: int):
-    return int(np.clip(np.sqrt(max(1, n_train)), 5, 25))
-
-# Drift report (winsorized z-score)
-TOP_Z = 2.0
-
-def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
-    if num_cols is None:
-        num_cols = _resolve_num_cols(X_train_all)
+def _fit_numeric_quantiles(X_train_all: pd.DataFrame, num_cols: list, qs=(0.05, 0.25, 0.75, 0.95)):
+    """คำนวณ quantiles ต่อฟีเจอร์จากชุดฝึก: P5,P25,P75,P95"""
+    Q = {}
     Xt = _prep_num(X_train_all[num_cols], num_cols)
-    mu = Xt.mean()
-    sd = Xt.std().replace(0, 1.0)
-    x = _prep_num(X_input_one[num_cols], num_cols).iloc[0]
-    z = ((x - mu) / sd).clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
-    return [(c, float(z[c]), float(x[c])) for c in z.index[:topn]]
+    for c in num_cols:
+        s = Xt[c].dropna().astype(float)
+        if len(s) == 0:
+            Q[c] = {"p5": 0, "p25": 0, "p75": 0, "p95": 0}
+            continue
+        p5, p25, p75, p95 = s.quantile([qs[0], qs[1], qs[2], qs[3]]).values
+        Q[c] = {"p5": float(p5), "p25": float(p25), "p75": float(p75), "p95": float(p95)}
+    return Q
 
-# Hybrid rescale + label
+def _conf_num_quantile(x_row: pd.Series, Q: dict, num_cols: list):
+    """ให้ความมั่นใจต่อฟีเจอร์ = 1 ใน [P25,P75], ลดเชิงเส้นไป 0.5 ที่ P5/P95, แล้วรวมด้วย geometric mean"""
+    eps = 1e-9
+    confs = []
+    for c in num_cols:
+        v = safe_float(x_row.get(c, 0.0))
+        p5, p25, p75, p95 = Q[c]["p5"], Q[c]["p25"], Q[c]["p75"], Q[c]["p95"]
+        if p25 == p75:        # กัน corner case
+            confs.append(1.0)
+            continue
+        if v < p25:
+            if v <= p5: conf = 0.5
+            else:
+                conf = 0.5 + 0.5 * (v - p5) / max(p25 - p5, eps)
+        elif v > p75:
+            if v >= p95: conf = 0.5
+            else:
+                conf = 0.5 + 0.5 * (p95 - v) / max(p95 - p75, eps)
+        else:
+            conf = 1.0
+        confs.append(float(np.clip(conf, 0.0, 1.0)))
+    # geometric mean (ถ้าไม่มีฟีเจอร์ ให้ 1.0)
+    if len(confs) == 0: 
+        return 1.0
+    return float(np.exp(np.mean(np.log(np.clip(confs, 1e-9, 1.0)))))
 
-def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
-    cr = float(conf_raw)
-    conf_rescaled = (cr - low) / (high - low)
-    conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
-    if conf_rescaled >= 0.75: return conf_rescaled, "เหมือนมาก", "✅"
-    if conf_rescaled >= 0.45: return conf_rescaled, "ใกล้เคียง", "ℹ️"
-    return conf_rescaled, "ต่างเยอะ", "⚠️"
+# ===== Frequency-based categorical confidence (ต่อคอลัมน์) =====
 
-# Normalizers / text utils
-
-def _norm_obj(x):
-    if pd.isna(x): return ""
-    return re.sub(r"\s+", " ", str(x).strip().lower())
-
-def _unique_normalized(series: pd.Series):
-    return set(series.dropna().astype(str).map(_norm_obj).unique())
-
-def _norm_txt(s):
-    if s is None: return ""
-    s = str(s).strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-def _top_counts(series, topk=5):
-    vc = series.dropna().astype(str).str.strip().value_counts()
-    return [(z, int(c)) for z, c in vc.head(topk).items()]
-
-# Geo chain & zone guess
-
-def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
-    steps = []
-    def _match(col, val): return df[col].astype(str).str.strip().str.lower() == _norm_txt(val)
-    if street:
-        df4 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict) & _match("Street", street)]
-        steps.append(("prov+dist+sub+street", df4))
-    if subdistrict:
-        df3 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict)]
-        steps.append(("prov+dist+sub", df3))
-    if district:
-        df2 = df[_match("Province", province) & _match("District", district)]
-        steps.append(("prov+dist", df2))
-    if province:
-        df1 = df[_match("Province", province)]
-        steps.append(("prov", df1))
-    return steps
-
-def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zone=None, topk=5):
-    best_zone, candidates, picked_from = "", [], ""
-    if xtrain_df is not None and "Zone" in xtrain_df.columns:
-        for tag, dff in _filter_chain(xtrain_df, province, district, subdistrict, street):
-            if len(dff):
-                cands = _top_counts(dff["Zone"], topk=topk)
-                if cands:
-                    best_zone = cands[0][0]; candidates = cands; picked_from = tag
-                    break
-    if not best_zone and street_to_zone is not None:
-        z = street_to_zone.get(street, "")
-        if z:
-            best_zone = z; candidates = [(z, 0)]; picked_from = "street_mapping"
-    return best_zone, candidates, picked_from
-
-# Misc
-
-def month_to_sin_cos(m: int):
-    rad = 2 * math.pi * (m - 1) / 12.0
-    return math.sin(rad), math.cos(rad)
-
-def safe_float(x, default=0.0):
-    try: return float(x)
-    except: return float(default)
-
-def ensure_columns(df: pd.DataFrame, cols: list, fill_value_map: dict = None) -> pd.DataFrame:
-    df = df.copy()
-    fill_value_map = fill_value_map or {}
-    for c in cols:
-        if c not in df.columns:
-            df[c] = fill_value_map.get(c, 0)
-    return df[cols]
-
-def flexible_selectbox(label, options):
-    extended_options = options + ["อื่น ๆ (พิมพ์เอง)"]
-    choice = st.selectbox(label, extended_options)
-    if choice == "อื่น ๆ (พิมพ์เอง)":
-        manual_value = st.text_input(f"กรุณาพิมพ์ {label} ที่ต้องการ")
-        return manual_value.strip()
-    else:
-        return choice
-
-# Router helpers
-
-def _which_side(pipeline, X_one_row):
-    if hasattr(pipeline, "predict_side"):
-        try:
-            lab, _ = pipeline.predict_side(pd.DataFrame([X_one_row]))
-            if len(lab): return lab[0]
-        except Exception:
-            pass
-    return "LUX" if float(X_one_row.get("Area_sqm", 0)) > 250 else "MASS"
-
-# ===== New: Similarity-based Confidence (RBF+Categorical) =====
-CONF_PARAMS = {
-    "k_num": 50,      # k เพื่อนบ้านสำหรับฝั่งตัวเลข
-    "tau": None,      # ถ้า None จะใช้ median(d^2) ของ k เพื่อนบ้าน
-    "wN": 0.6,        # น้ำหนักฝั่งตัวเลข
-    "wC": 0.4,        # น้ำหนักฝั่งหมวดหมู่ (wN+wC=1)
-    "alpha": 0.7,     # โทษ unseen ต่อคอลัมน์ (1-alpha = match score เมื่อ unseen)
-    "m": 20.0,        # smoothing ของ coverage (จำนวนเคสขั้นต่ำก่อนเชื่อค่า)
-    "beta": 1.0,      # โทษ unseen รวมตามสัดส่วนคอลัมน์ที่ unseen
-    "lam": 0.05,      # ฐานความมั่นใจขั้นต่ำ
-    "gamma": 2.0,     # ความโค้ง (ยิ่งมากยิ่งแยกแรง)
-    "cmin": 0.05,     # clip ต่ำสุดหลังคูณ base_conf
-    "cmax": 0.99,     # clip สูงสุด
-    "base_conf": 0.80 # ฐานความมั่นใจโดยรวมของโมเดล
-}
-
-CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
-
-def _rbf_numeric_similarity(x_scaled: np.ndarray, Z_train: np.ndarray, k=50, tau=None):
-    k = int(min(max(1, k), len(Z_train)))
-    nn = NearestNeighbors(n_neighbors=k, metric="euclidean")
-    nn.fit(Z_train)
-    dists, _ = nn.kneighbors(x_scaled.reshape(1,-1), return_distance=True)
-    d2 = (dists[0] ** 2)
-    if tau is None:
-        med = np.median(d2)
-        tau = med if med > 0 else (np.mean(d2) + 1e-9)
-    return float(np.mean(np.exp(-d2 / tau)))
-
-def _build_counts_per_feature(X_train_all: pd.DataFrame, cat_cols: list):
-    counts = []
-    Xc = X_train_all.copy()
+def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: float = 5.0):
+    """
+    เก็บ stats ต่อคอลัมน์: counts, N, K, n_max สำหรับทำความมั่นใจแบบความถี่
+    """
+    stats = []
     for c in cat_cols:
-        if c not in Xc.columns:
-            Xc[c] = ""
-        vc = Xc[c].astype(str).str.strip().value_counts(dropna=False)
-        counts.append(vc.to_dict())
-    return counts
+        if c not in X_train_all.columns:
+            vc = pd.Series(dtype=int)
+        else:
+            vc = X_train_all[c].astype(str).str.strip().fillna("").value_counts(dropna=False)
+        counts = vc.to_dict()
+        N = int(vc.sum())
+        K = int(len(vc))
+        n_max = int(vc.max()) if K > 0 else 0
+        stats.append({"col": c, "counts": counts, "N": N, "K": K, "n_max": n_max, "alpha": float(alpha)})
+    return stats
 
-def _categorical_similarity(x_row: pd.Series, counts_per_feature: list, cat_cols: list, alpha=0.7, m=20.0, wC=None):
-    values = [str(x_row.get(c, "")).strip() for c in cat_cols]
-    q = len(cat_cols)
-    if q == 0:
-        return 1.0, 0.0
-    if wC is None:
-        wC = np.ones(q) / q
+def _conf_cat_from_stats(x_row: pd.Series, cat_stats: list):
+    """
+    ความมั่นใจหมวดหมู่ต่อคอลัมน์: ใช้ log-normalize บน (n + alpha)
+    conf_j = log(1 + n + alpha) / log(1 + n_max + alpha)
+    รวมทุกคอลัมน์ด้วย geometric mean
+    """
+    confs = []
+    for st in cat_stats:
+        c = st["col"]
+        counts = st["counts"]; n_max = st["n_max"]; a = st["alpha"]
+        val = str(x_row.get(c, "")).strip()
+        n = int(counts.get(val, 0))
+        num = math.log(1.0 + n + a)
+        den = math.log(1.0 + (n_max if n_max > 0 else 0) + a)
+        conf_j = (num / den) if den > 0 else 0.5
+        confs.append(float(np.clip(conf_j, 0.0, 1.0)))
+    if len(confs) == 0:
+        return 1.0
+    return float(np.exp(np.mean(np.log(np.clip(confs, 1e-9, 1.0)))))
 
-    s_total = 0.0
-    unseen = 0
-    for j, (val, cnts) in enumerate(zip(values, counts_per_feature)):
-        n = cnts.get(val, 0)
-        seen = n > 0
-        c = n / (n + m) if (n + m) > 0 else 0.0
-        match = 1.0 if seen else (1.0 - alpha)
-        s_j = match * c
-        s_total += float(wC[j]) * s_j
-        if not seen:
-            unseen += 1
+# ===== Overall Hybrid (geometric mean ของ numeric & categorical) =====
 
-    unseen_frac = unseen / q
-    return float(s_total), float(unseen_frac)
-
-def _combine_confidence(S_num, S_cat, unseen_frac, params: dict):
-    """Linear scaling confidence"""
-    wN, wC = params["wN"], params["wC"]
-    S = wN * S_num + wC * S_cat
-    S_tilde = S * math.exp(-params["beta"] * unseen_frac)
-    # Linear scaling (ไม่ยกกำลัง)
-    conf = params["lam"] + (1 - params["lam"]) * S_tilde
-    return float(np.clip(conf, params["cmin"], params["cmax"])), float(S_tilde)
-
-def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
-    """ปรับสเกล + ตี label ใหม่"""
-    cr = float(conf_raw)
-    conf_rescaled = (cr - low) / (high - low)
-    conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
-    if conf_rescaled >= 0.75: 
-        return conf_rescaled, "มั่นใจสูง", "✅"
-    if conf_rescaled >= 0.45: 
-        return conf_rescaled, "ปานกลาง", "ℹ️"
-    return conf_rescaled, "มั่นใจต่ำ", "⚠️"
-
+def _hybrid_from_num_cat(conf_num: float, conf_cat: float):
+    return float(np.sqrt(max(1e-9, conf_num) * max(1e-9, conf_cat)))
 
 # ==========================
 # Load model & training data
@@ -383,26 +238,24 @@ def _align_Xy_for_conformal(Xt, y):
 Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
 
 # ==========================
-# Confidence bootstrap
+# Quantile & Frequency stats (NEW)
 # ==========================
-NUM_ONLY = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
+quantiles_per_num = None
+cat_stats_for_conf = None
 
-conf_ready = False
-r_scaler = s_scaler = None
-Xt_scaled_train = None
-counts_per_feature = None
 try:
     if (X_train_all is not None) and (len(X_train_all) > 0):
         num_cols = _resolve_num_cols(X_train_all)
-        Xt_num = _prep_num(X_train_all[num_cols], num_cols)
-        r_scaler, s_scaler = _robust_scale_fit_nums(Xt_num)
-        Xt_scaled_train = _robust_scale_transform_nums(Xt_num, r_scaler, s_scaler)
-        # เตรียม categorical counts สำหรับ similarity
-        counts_per_feature = _build_counts_per_feature(X_train_all, CAT_FOR_CONF)
+        quantiles_per_num = _fit_numeric_quantiles(X_train_all, num_cols)
+        cat_stats_for_conf = _fit_categorical_stats(X_train_all, CAT_FOR_CONF, alpha=5.0)
         conf_ready = True
+        st.sidebar.success("Confidence stats (quantiles & categorical frequency) พร้อมใช้งาน ✅")
+    else:
+        st.sidebar.warning("⚠️ ไม่มี X_train — ยังทำ confidence แบบใหม่ไม่ได้")
 except Exception as e:
-    st.sidebar.warning(f"ตั้งค่า Confidence ไม่สำเร็จ: {e}")
+    st.sidebar.warning(f"ตั้งค่า Quantile/Freq ไม่สำเร็จ: {e}")
     conf_ready = False
+
 
 # ==========================
 # Conformal Calibration
@@ -577,53 +430,43 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== New Hybrid Confidence (Similarity-based) =====
-        if conf_ready and (counts_per_feature is not None) and (Xt_scaled_train is not None):
+        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====
+        if conf_ready and (quantiles_per_num is not None) and (cat_stats_for_conf is not None):
             try:
-                # Numeric similarity (RBF on scaled numerics)
                 num_cols = _resolve_num_cols(X_train_all)
-                x_num = _prep_num(X[num_cols], num_cols)
-                x_scaled = _robust_scale_transform_nums(x_num, r_scaler, s_scaler)
-                S_num = _rbf_numeric_similarity(x_scaled[0], Xt_scaled_train,k=CONF_PARAMS["k_num"], tau=CONF_PARAMS["tau"])
+                # Numeric confidence (quantile-based)
+                conf_num = _conf_num_quantile(X.iloc[0], quantiles_per_num, num_cols)
 
+                # Categorical confidence (frequency-based)
+                conf_cat = _conf_cat_from_stats(X.iloc[0], cat_stats_for_conf)
 
-                # Categorical similarity (+ unseen penalties)
-                S_cat, unseen_frac = _categorical_similarity(
-                    X.iloc[0], counts_per_feature, CAT_FOR_CONF,
-                    alpha=CONF_PARAMS["alpha"], m=CONF_PARAMS["m"]
-                )
+                # Combine with geometric mean
+                hybrid_raw = _hybrid_from_num_cat(conf_num, conf_cat)
 
-                # Combine + Nonlinear mapping to confidence
-                conf_val, S_tilde = _combine_confidence(
-                    S_num, S_cat, unseen_frac, CONF_PARAMS
-                )
+                # (ออปชัน) ปรับสเกลให้อ่านง่ายขึ้นเป็น % และติด label
+                conf_rescaled, conf_label, conf_icon = _rescale_and_label(hybrid_raw, low=0.20, high=0.85)
 
-                # Label/report
-                conf_rescaled, conf_label, conf_icon = _rescale_and_label(conf_val, low=0.20, high=0.85)
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf_rescaled*100:.1f} %", help=f"Label: {conf_label}")
-                st.info(f"{conf_icon} ระดับความคล้าย: **{conf_label}**  (S_num={S_num:.3f}, S_cat={S_cat:.3f}, unseen={unseen_frac:.2f})")
+                st.info(f"{conf_icon} รายละเอียด: conf_num={conf_num:.3f}, conf_cat={conf_cat:.3f} → geometric mean={hybrid_raw:.3f}")
 
-                with st.expander("รายละเอียดความคล้าย (กดเพื่อเปิด)", expanded=False):
-                    st.write(f"- Numeric similarity (RBF): **{S_num*100:.1f}%**")
-                    st.write(f"- Categorical similarity: **{S_cat*100:.1f}%**")
-                    st.write(f"- Unseen fraction: **{unseen_frac*100:.1f}%**")
-                    st.caption(f"S_tilde = (wN*S_num + wC*S_cat) * exp(-beta * unseen) = {S_tilde:.3f}")
-                    st.caption(f"params: wN={CONF_PARAMS['wN']}, wC={CONF_PARAMS['wC']}, alpha={CONF_PARAMS['alpha']}, m={CONF_PARAMS['m']}, beta={CONF_PARAMS['beta']}, lam={CONF_PARAMS['lam']}, gamma={CONF_PARAMS['gamma']}")
-
-                if conf_label == "ต่างเยอะ":
-                    with st.expander("🔎 ทำไมความมั่นใจต่ำ? (numeric drift top-3)", expanded=False):
+                with st.expander("รายละเอียดการคำนวณ", expanded=False):
+                    st.write("- **Numeric (quantile-based)**: 1 ในช่วง [P25,P75], ลดเชิงเส้นไป 0.5 ที่ P5/P95, รวมทุกคอลัมน์ด้วย geometric mean")
+                    st.write("- **Categorical (freq-based)**: conf_j=log(1+n+α)/log(1+n_max+α), รวมข้ามคอลัมน์ด้วย geometric mean; α=5")
+                    st.caption("Hybrid = sqrt(conf_num * conf_cat)  → จากนั้นทำ rescale (low=0.20, high=0.85) เพื่อแปลงเป็นสเกลที่อ่านง่ายใน UI")
+                
+                if conf_label == "มั่นใจต่ำ":
+                    with st.expander("🔎 ทำไมความมั่นใจต่ำ?", expanded=False):
                         dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
                         if dr:
                             st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
                         if unseen_cols:
                             st.write("หมวดหมู่ที่ไม่เคยพบใน training (หลัง normalize): ", ", ".join(unseen_cols))
             except Exception as e:
-                st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence ได้: {e}")
+                st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence (ใหม่) ได้: {e}")
         else:
-            st.warning("⚠️ ข้อมูล train ไม่พร้อม — ยังไม่แสดง Hybrid Confidence")
+            st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
 
-    except Exception as e:
-        st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
 
