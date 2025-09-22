@@ -504,15 +504,18 @@ if isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
 else:
     zone = st.text_input("Zone (auto from street / editable)", value=STREET_TO_ZONE.get(street, ""))
 
-room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options = [
-    'STUDIO','2BED','3BED','1BED','1BED_PLUS','PENTHOUSE','2BED_DUPLEX',
-    '1BED_DUPLEX','DUPLEX_OTHER','4BED','POOL_VILLA','4BED_PENTHOUSE',
-    '3BED_DUPLEX','1BED_LOFT','3BED_TRIPLEX','3BED_PENTHOUSE','4BED_DUPLEX',
-    '5BED_DUPLEX','2BED_PLUS','PENTHOUSE_DUPLEX','Pool Access(เชื่อมสระว่ายน้ำ)',
-    '5BED','MOFF-Design','25BED','LOFT_OTHER','2BED_PENTHOUSE','SHOP',
-    '1BED_PLUS_LOฟ','2BED_LOฟ','Stuio vertiplex','3BED_PLUS','3BED_PLUS_DUPLEX',
-    '3BED_LOFT','4BED_LOFT','DUO','1BED_TRIPLEX','1BED_PLUS_TRIPLEX','2BED_TRIPLEX','Simplex'
-])
+# ----------------------
+# RoomType (ปรับให้ตรงกับกลุ่มที่มีจริง)
+# ----------------------
+roomtype_options = [
+    "STUDIO","1BED","1BEDplus","1BEDduplex",
+    "2BED","2BEDplus","2BEDduplex",
+    "3BED","3BEDplus","3BEDduplex",
+    "other"
+]
+
+room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options=roomtype_options)
+
 
 # Row & X
 row = {
@@ -609,3 +612,4 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
+
