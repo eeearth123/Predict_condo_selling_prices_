@@ -430,7 +430,7 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====
+        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====#
         if conf_ready and (quantiles_per_num is not None) and (cat_stats_for_conf is not None):
             try:
                 num_cols = _resolve_num_cols(X_train_all)
@@ -465,5 +465,6 @@ if st.button("Predict Price (ล้านบาท)"):
                 st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence (ใหม่) ได้: {e}")
         else:
             st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
+
 
 
