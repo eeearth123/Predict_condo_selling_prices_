@@ -98,6 +98,128 @@ sys.modules['main'] = sys.modules[__name__]
 # ==================
 # ----- Helpers -----
 # ==================
+# ==================
+# ----- Helpers -----
+# ==================
+
+# Numeric resolver (กันกรณีกำหนด NUM_ONLY ไม่ครบ)
+NUM_ONLY_FALLBACK = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
+def _resolve_num_cols(df_like=None):
+    num_cols = globals().get("NUM_ONLY", NUM_ONLY_FALLBACK)
+    if df_like is not None and hasattr(df_like, "columns"):
+        num_cols = [c for c in num_cols if c in df_like.columns]
+    return num_cols
+
+def _prep_num(df, num_cols=None):
+    """เตรียม numeric + log1p(Total_Units)"""
+    if num_cols is None:
+        num_cols = _resolve_num_cols(df)
+    z = df.copy()
+    for c in num_cols:
+        if c not in z.columns:
+            z[c] = 0.0
+    z = z[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if "Total_Units" in z.columns:
+        z["Total_Units"] = np.log1p(z["Total_Units"])
+    return z
+
+# Drift report (winsorized z-score)
+TOP_Z = 2.0
+def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
+    if num_cols is None:
+        num_cols = _resolve_num_cols(X_train_all)
+    Xt = _prep_num(X_train_all[num_cols], num_cols)
+    mu = Xt.mean()
+    sd = Xt.std().replace(0, 1.0)
+    x = _prep_num(X_input_one[num_cols], num_cols).iloc[0]
+    z = ((x - mu) / sd).clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
+    return [(c, float(z[c]), float(x[c])) for c in z.index[:topn]]
+
+# ปรับสเกลคะแนน + label สำหรับ UI
+def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
+    cr = float(conf_raw)
+    conf_rescaled = (cr - low) / (high - low)
+    conf_rescaled = float(np.clip(conf_rescaled, 0.0, 1.0))
+    if conf_rescaled >= 0.75: return conf_rescaled, "มั่นใจสูง", "✅"
+    if conf_rescaled >= 0.45: return conf_rescaled, "ปานกลาง", "ℹ️"
+    return conf_rescaled, "มั่นใจต่ำ", "⚠️"
+
+# Normalizers / text utils
+def _norm_obj(x):
+    if pd.isna(x): return ""
+    return re.sub(r"\s+", " ", str(x).strip().lower())
+
+def _unique_normalized(series: pd.Series):
+    return set(series.dropna().astype(str).map(_norm_obj).unique())
+
+def _norm_txt(s):
+    if s is None: return ""
+    s = str(s).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _top_counts(series, topk=5):
+    vc = series.dropna().astype(str).str.strip().value_counts()
+    return [(z, int(c)) for z, c in vc.head(topk).items()]
+
+# Geo chain & zone guess
+def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
+    steps = []
+    def _match(col, val): return df[col].astype(str).str.strip().str.lower() == _norm_txt(val)
+    if street:
+        df4 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict) & _match("Street", street)]
+        steps.append(("prov+dist+sub+street", df4))
+    if subdistrict:
+        df3 = df[_match("Province", province) & _match("District", district) & _match("Subdistrict", subdistrict)]
+        steps.append(("prov+dist+sub", df3))
+    if district:
+        df2 = df[_match("Province", province) & _match("District", district)]
+        steps.append(("prov+dist", df2))
+    if province:
+        df1 = df[_match("Province", province)]
+        steps.append(("prov", df1))
+    return steps
+
+def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zone=None, topk=5):
+    best_zone, candidates, picked_from = "", [], ""
+    if xtrain_df is not None and "Zone" in xtrain_df.columns:
+        for tag, dff in _filter_chain(xtrain_df, province, district, subdistrict, street):
+            if len(dff):
+                cands = _top_counts(dff["Zone"], topk=topk)
+                if cands:
+                    best_zone = cands[0][0]; candidates = cands; picked_from = tag
+                    break
+    if not best_zone and street_to_zone is not None:
+        z = street_to_zone.get(street, "")
+        if z:
+            best_zone = z; candidates = [(z, 0)]; picked_from = "street_mapping"
+    return best_zone, candidates, picked_from
+
+# Misc small helpers
+def month_to_sin_cos(m: int):
+    rad = 2 * math.pi * (int(m) - 1) / 12.0
+    return math.sin(rad), math.cos(rad)
+
+def safe_float(x, default=0.0):
+    try: return float(x)
+    except: return float(default)
+
+def ensure_columns(df: pd.DataFrame, cols: list, fill_value_map: dict = None) -> pd.DataFrame:
+    df = df.copy()
+    fill_value_map = fill_value_map or {}
+    for c in cols:
+        if c not in df.columns:
+            df[c] = fill_value_map.get(c, 0)
+    return df[cols]
+
+def flexible_selectbox(label, options):
+    extended_options = list(options) + ["อื่น ๆ (พิมพ์เอง)"]
+    choice = st.selectbox(label, extended_options)
+    if choice == "อื่น ๆ (พิมพ์เอง)":
+        manual_value = st.text_input(f"กรุณาพิมพ์ {label} ที่ต้องการ")
+        return manual_value.strip()
+    else:
+        return choice
 
 # ===== Quantile-based numeric confidence =====
 
@@ -466,5 +588,6 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
     except Exception as e:st.error(f"ทำนายไม่สำเร็จ: {e}")
+
 
 
