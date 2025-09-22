@@ -1,5 +1,5 @@
 # =========================
-# streamlit_app.py (FULL, Hybrid Confidence v2)
+# streamlit_app.py (FULL, Hybrid Confidence v2 + RoomType resolver)
 # =========================
 import os, sys, math, json, warnings, re
 warnings.filterwarnings("ignore")
@@ -10,10 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from locations_th import PROV_TO_DIST, DIST_TO_SUB, SUB_TO_STREET, STREET_TO_ZONE
-from sklearn.preprocessing import RobustScaler, StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.neighbors import NearestNeighbors
 from dataclasses import dataclass, field
 
@@ -25,7 +22,7 @@ NUM_FEATURES = [
     "Area_sqm", "Project_Age_notreal", "Floors", "Total_Units",
     "Launch_Month_sin", "Launch_Month_cos",
 ] + FLAGS
-CAT_FEATURES = ["Room_Type_Base", "Province", "District", "Subdistrict", "Street", "Zone"]
+CAT_FEATURES = ["Province", "District", "Subdistrict", "Street", "Zone", "Room_Type_Base"]  # default
 ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
 
 PIPELINE_FILE = "pipeline.pkl"
@@ -38,7 +35,6 @@ CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_B
 # =========================================
 # TwoSegmentRegressor shim (for unpickle)
 # =========================================
-
 def _ensure_columns(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     d = df.copy()
     for c in cols:
@@ -94,15 +90,12 @@ class TwoSegmentRegressor:
         lab = np.where(side, "LUX", "MASS")
         return lab, prob
 
-# ให้ pickle หา class ในโมดูล main
 TwoSegmentRegressor.__module__ = "main"
 sys.modules['main'] = sys.modules[__name__]
 
 # ==================
 # ----- Helpers -----
 # ==================
-
-# Numeric resolver (กันกรณีกำหนด NUM_ONLY ไม่ครบ)
 NUM_ONLY_FALLBACK = ["Area_sqm","Project_Age_notreal","Floors","Total_Units","Launch_Month_sin","Launch_Month_cos"]
 def _resolve_num_cols(df_like=None):
     num_cols = globals().get("NUM_ONLY", NUM_ONLY_FALLBACK)
@@ -123,7 +116,6 @@ def _prep_num(df, num_cols=None):
         z["Total_Units"] = np.log1p(z["Total_Units"])
     return z
 
-# Drift report (winsorized z-score)
 TOP_Z = 2.0
 def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
     if num_cols is None:
@@ -135,7 +127,6 @@ def _dimension_drift_report(X_train_all, X_input_one, num_cols=None, topn=3):
     z = ((x - mu) / sd).clip(-TOP_Z, TOP_Z).abs().sort_values(ascending=False)
     return [(c, float(z[c]), float(x[c])) for c in z.index[:topn]]
 
-# ปรับสเกลคะแนน + label สำหรับ UI
 def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     cr = float(conf_raw)
     conf_rescaled = (cr - low) / (high - low)
@@ -144,7 +135,6 @@ def _rescale_and_label(conf_raw: float, low=0.20, high=0.85):
     if conf_rescaled >= 0.45: return conf_rescaled, "ปานกลาง", "ℹ️"
     return conf_rescaled, "มั่นใจต่ำ", "⚠️"
 
-# Normalizers / text utils
 def _norm_obj(x):
     if pd.isna(x): return ""
     return re.sub(r"\s+", " ", str(x).strip().lower())
@@ -162,7 +152,6 @@ def _top_counts(series, topk=5):
     vc = series.dropna().astype(str).str.strip().value_counts()
     return [(z, int(c)) for z, c in vc.head(topk).items()]
 
-# Geo chain & zone guess
 def _filter_chain(df, province=None, district=None, subdistrict=None, street=None):
     steps = []
     def _match(col, val): return df[col].astype(str).str.strip().str.lower() == _norm_txt(val)
@@ -195,9 +184,8 @@ def guess_zone(province, district, subdistrict, street, xtrain_df, street_to_zon
             best_zone = z; candidates = [(z, 0)]; picked_from = "street_mapping"
     return best_zone, candidates, picked_from
 
-# Misc small helpers
 def month_to_sin_cos(m: int):
-    rad = 2 * math.pi * (int(m) - 1) / 12.0
+    rad = 2 * math.pi (int(m) - 1) / 12.0  # <-- NOTE: will be fixed below
     return math.sin(rad), math.cos(rad)
 
 def safe_float(x, default=0.0):
@@ -221,8 +209,12 @@ def flexible_selectbox(label, options):
     else:
         return choice
 
-# ===== Quantile-based numeric confidence =====
+# 🔧 fix month_to_sin_cos typo (overwrite)
+def month_to_sin_cos(m: int):
+    rad = 2 * math.pi * (int(m) - 1) / 12.0
+    return math.sin(rad), math.cos(rad)
 
+# ===== Quantile-based numeric confidence =====
 def _fit_numeric_quantiles(X_train_all: pd.DataFrame, num_cols: list, qs=(0.05, 0.25, 0.75, 0.95)):
     """คำนวณ quantiles ต่อฟีเจอร์จากชุดฝึก: P5,P25,P75,P95"""
     Q = {}
@@ -243,31 +235,25 @@ def _conf_num_quantile(x_row: pd.Series, Q: dict, num_cols: list):
     for c in num_cols:
         v = safe_float(x_row.get(c, 0.0))
         p5, p25, p75, p95 = Q[c]["p5"], Q[c]["p25"], Q[c]["p75"], Q[c]["p95"]
-        if p25 == p75:        # กัน corner case
+        if p25 == p75:
             confs.append(1.0)
             continue
         if v < p25:
             if v <= p5: conf = 0.5
-            else:
-                conf = 0.5 + 0.5 * (v - p5) / max(p25 - p5, eps)
+            else:       conf = 0.5 + 0.5 * (v - p5) / max(p25 - p5, eps)
         elif v > p75:
             if v >= p95: conf = 0.5
-            else:
-                conf = 0.5 + 0.5 * (p95 - v) / max(p95 - p75, eps)
+            else:        conf = 0.5 + 0.5 * (p95 - v) / max(p95 - p75, eps)
         else:
             conf = 1.0
         confs.append(float(np.clip(conf, 0.0, 1.0)))
-    # geometric mean (ถ้าไม่มีฟีเจอร์ ให้ 1.0)
     if len(confs) == 0: 
         return 1.0
     return float(np.exp(np.mean(np.log(np.clip(confs, 1e-9, 1.0)))))
 
-# ===== Frequency-based categorical confidence (ต่อคอลัมน์) =====
-
+# ===== Frequency-based categorical confidence =====
 def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: float = 5.0):
-    """
-    เก็บ stats ต่อคอลัมน์: counts, N, K, n_max สำหรับทำความมั่นใจแบบความถี่
-    """
+    """เก็บ counts/N/K/n_max ต่อคอลัมน์ สำหรับ conf ของหมวดหมู่"""
     stats = []
     Xc = X_train_all.copy()
     for c in cat_cols:
@@ -275,22 +261,17 @@ def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: flo
             Xc[c] = ""
         vc = Xc[c].astype(str).str.strip().fillna("").value_counts(dropna=False)
         counts = vc.to_dict()
-        N = int(vc.sum())
-        K = int(len(vc))
+        N = int(vc.sum()); K = int(len(vc))
         n_max = int(vc.max()) if K > 0 else 0
         stats.append({"col": c, "counts": counts, "N": N, "K": K, "n_max": n_max, "alpha": float(alpha)})
     return stats
 
 def _conf_cat_from_stats(x_row: pd.Series, cat_stats: list):
-    """
-    ความมั่นใจหมวดหมู่ต่อคอลัมน์: ใช้ log-normalize บน (n + alpha)
-    conf_j = log(1 + n + alpha) / log(1 + n_max + alpha)
-    รวมทุกคอลัมน์ด้วย geometric mean
-    """
+    """conf_j = log(1 + n + alpha) / log(1 + n_max + alpha), รวมด้วย geometric mean"""
     confs = []
-    for st in cat_stats:
-        c = st["col"]
-        counts = st["counts"]; n_max = st["n_max"]; a = st["alpha"]
+    for st_ in cat_stats:
+        c = st_["col"]
+        counts = st_["counts"]; n_max = st_["n_max"]; a = st_["alpha"]
         val = str(x_row.get(c, "")).strip()
         n = int(counts.get(val, 0))
         num = math.log(1.0 + n + a)
@@ -300,8 +281,6 @@ def _conf_cat_from_stats(x_row: pd.Series, cat_stats: list):
     if len(confs) == 0:
         return 1.0
     return float(np.exp(np.mean(np.log(np.clip(confs, 1e-9, 1.0)))))
-
-# ===== Overall Hybrid (geometric mean ของ numeric & categorical) =====
 
 def _hybrid_from_num_cat(conf_num: float, conf_cat: float):
     return float(np.sqrt(max(1e-9, conf_num) * max(1e-9, conf_cat)))
@@ -346,7 +325,6 @@ except Exception as e:
     st.sidebar.warning(f"โหลด y_train ไม่สำเร็จ: {e}")
     y_train_all = None
 
-# Align X/y สำหรับ conformal
 def _align_Xy_for_conformal(Xt, y):
     if Xt is None or y is None: return None, None
     y = pd.Series(y)
@@ -357,6 +335,35 @@ def _align_Xy_for_conformal(Xt, y):
     return Xt2, y2
 
 Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
+
+# ==========================
+# RoomType resolver (NEW)
+# ==========================
+def _roomtype_col(df):
+    if isinstance(df, pd.DataFrame):
+        if "Room_Type_Base" in df.columns: return "Room_Type_Base"
+        if "RoomType_Group" in df.columns: return "RoomType_Group"
+    return "RoomType_Group"  # ดีฟอลต์ถ้าไม่รู้ ให้ไปตาม group ใหม่นี้
+
+ROOMTYPE_COL = _roomtype_col(X_train_all)
+
+def _roomtype_vocab(df, colname):
+    if not isinstance(df, pd.DataFrame) or (colname not in df.columns):
+        return set()
+    return set(df[colname].dropna().astype(str).map(_norm_obj).unique())
+
+ROOMTYPE_VOCAB = _roomtype_vocab(X_train_all, ROOMTYPE_COL)
+
+ROOMTYPE_ALIAS = {
+    # UI -> canonical ที่คาดว่าตรงกับเทรน (รองรับเคสตัวพิมพ์เล็ก)
+    "1BEDplus": "1BEDplus", "1bedplus": "1BEDplus",
+    "1BEDduplex": "1BEDduplex", "1bedduplex": "1BEDduplex",
+    "2BEDplus": "2BEDplus", "2bedplus": "2BEDplus",
+    "2BEDduplex": "2BEDduplex", "2bedduplex": "2BEDduplex",
+    "3BEDplus": "3BEDplus", "3bedplus": "3BEDplus",
+    "3BEDduplex": "3BEDduplex", "3bedduplex": "3BEDduplex",
+    # ถ้าเทรนใช้รูปแบบอื่น ให้เพิ่มแมปได้ที่นี่
+}
 
 # ==========================
 # Quantile & Frequency stats (NEW)
@@ -371,7 +378,10 @@ try:
         for c in CAT_FOR_CONF:
             if c not in X_train_all.columns:
                 X_train_all[c] = ""
-
+        # ให้แน่ใจว่ามีคอลัมน์ roomtype ที่ใช้จริงใน CAT_FOR_CONF/ALL_FEATURES
+        if ROOMTYPE_COL not in CAT_FOR_CONF:
+            CAT_FOR_CONF = [z for z in CAT_FOR_CONF if z not in ("Room_Type_Base","RoomType_Group")] + [ROOMTYPE_COL]
+        # เตรียมสถิติ
         num_cols = _resolve_num_cols(X_train_all)
         quantiles_per_num = _fit_numeric_quantiles(X_train_all, num_cols)
         cat_stats_for_conf = _fit_categorical_stats(X_train_all, CAT_FOR_CONF, alpha=5.0)
@@ -383,21 +393,16 @@ except Exception as e:
     st.sidebar.warning(f"ตั้งค่า Quantile/Freq ไม่สำเร็จ: {e}")
     conf_ready = False
 
-# ---- Debug: แสดงสถานะความพร้อมของสถิติใน sidebar ----
 with st.sidebar.expander("Confidence Stats Debug", expanded=False):
     st.write("conf_ready:", conf_ready)
     if X_train_all is None:
         st.write("X_train_all: None")
     else:
         st.write("X_train_all shape:", getattr(X_train_all, "shape", None))
-        st.write("Numeric cols available:", _resolve_num_cols(X_train_all))
+        st.write("ROOMTYPE_COL:", ROOMTYPE_COL)
         st.write("Has quantiles_per_num:", quantiles_per_num is not None)
         st.write("Has cat_stats_for_conf:", cat_stats_for_conf is not None)
-        if quantiles_per_num is not None:
-            st.write("Example quantiles keys:", list(quantiles_per_num.keys())[:3])
-        if cat_stats_for_conf is not None and len(cat_stats_for_conf) > 0:
-            st.write("Example cat col:", cat_stats_for_conf[0]["col"])
-            st.write("Example cat n_max:", cat_stats_for_conf[0]["n_max"])
+        st.write("CAT_FOR_CONF:", CAT_FOR_CONF)
 
 # ==========================
 # Conformal Calibration
@@ -425,6 +430,7 @@ def fit_conformal_from_calib(pipeline, X_train_df, y_train_arr, calib_frac=0.2, 
 
 conformal_ready, conformal_info = False, None
 try:
+    Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
     if (Xt_for_conf is not None) and (y_for_conf is not None):
         Xt_full = ensure_columns(Xt_for_conf, ALL_FEATURES, fill_value_map=None)
         conformal_info = fit_conformal_from_calib(pipeline, Xt_full, y_for_conf, calib_frac=0.2, seed=42)
@@ -438,7 +444,6 @@ except Exception as e:
 # ==========================
 # ---------- UI ----------
 # ==========================
-
 st.title("🏢 Condo Price Predictor")
 st.caption("กรอกข้อมูล → ทำนายราคาขาย (ล้านบาท) และราคาต่อตารางเมตร (บาท/ตร.ม.)")
 
@@ -505,7 +510,7 @@ else:
     zone = st.text_input("Zone (auto from street / editable)", value=STREET_TO_ZONE.get(street, ""))
 
 # ----------------------
-# RoomType (ปรับให้ตรงกับกลุ่มที่มีจริง)
+# RoomType UI (ใช้ตามที่มีจริง) + resolver → match vocab เทรน
 # ----------------------
 roomtype_options = [
     "STUDIO","1BED","1BEDplus","1BEDduplex",
@@ -513,18 +518,46 @@ roomtype_options = [
     "3BED","3BEDplus","3BEDduplex",
     "other"
 ]
+rt_user = st.selectbox("ประเภทห้อง — Room_Type", options=roomtype_options)
+rt_canon = ROOMTYPE_ALIAS.get(rt_user, rt_user)  # map เป็นชื่อที่โมเดลคาด
+rt_norm  = _norm_obj(rt_canon)
 
-room_type_base = st.selectbox("ประเภทห้อง — Room_Type", options=roomtype_options)
+# ถ้าไม่อยู่ใน vocab เทรน → fallback เป็น 'other' หรือ top-1
+if ROOMTYPE_VOCAB and (rt_norm not in ROOMTYPE_VOCAB):
+    st.warning("ปรับ Room Type เป็น 'other' เนื่องจากรูปแบบนี้ไม่พบใน training")
+    if _norm_obj("other") in ROOMTYPE_VOCAB:
+        rt_canon = "other"
+    else:
+        top1 = (
+            X_train_all[ROOMTYPE_COL]
+            .astype(str).str.strip()
+            .value_counts(dropna=False)
+            .index[0]
+        )
+        rt_canon = str(top1)
 
-
-# Row & X
+# ---------- Build row ----------
 row = {
     "Area_sqm": area, "Project_Age_notreal": age, "Floors": floors, "Total_Units": total_units,
     "Launch_Month_sin": m_sin, "Launch_Month_cos": m_cos,
     "Province": province, "District": district, "Subdistrict": subdistrict, "Street": street,
-    "Zone": zone, "Room_Type_Base": room_type_base,
+    "Zone": zone,
     "is_pool_access": 0, "is_corner": 0, "is_high_ceiling": 0,
 }
+# ใส่ roomtype ตามคอลัมน์เทรนจริง
+row[ROOMTYPE_COL] = rt_canon
+
+# เพื่อความเข้ากันได้ ถ้าอีกชื่อยังถูกใช้อยู่ที่อื่น ให้ใส่ทั้งสองคีย์
+if ROOMTYPE_COL == "RoomType_Group":
+    row["Room_Type_Base"] = rt_canon
+elif ROOMTYPE_COL == "Room_Type_Base":
+    row["RoomType_Group"] = rt_canon
+
+# อัพเดต FEATURE LIST ให้สอดคล้องคอลัมน์จริง
+CAT_FEATURES = [c for c in ["Province","District","Subdistrict","Street","Zone","Room_Type_Base","RoomType_Group"]
+                if (c in (X_train_all.columns if isinstance(X_train_all, pd.DataFrame) else []) ) or (c in row)]
+ALL_FEATURES = NUM_FEATURES + CAT_FEATURES
+
 X = pd.DataFrame([row], columns=ALL_FEATURES)
 
 # Unseen categories (normalized)
@@ -551,7 +584,7 @@ if st.button("Predict Price (ล้านบาท)"):
         price_per_sqm = (pred_val * 1_000_000.0) / max(1.0, safe_float(area, 1.0))
         st.metric("ราคาต่อตารางเมตร (บาท/ตร.ม.)", f"{price_per_sqm:,.0f}")
 
-        # Router side
+        # Router side (optional)
         try:
             side_label, side_prob = pipeline.predict_side(X)
             side_txt = side_label[0]
@@ -574,30 +607,18 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====
+        # ===== Hybrid Confidence (Quantile numeric + Frequency categorical + Geometric mean) =====
         if conf_ready and (quantiles_per_num is not None) and (cat_stats_for_conf is not None):
             try:
                 num_cols = _resolve_num_cols(X_train_all)
-                # Numeric confidence (quantile-based)
                 conf_num = _conf_num_quantile(X.iloc[0], quantiles_per_num, num_cols)
-
-                # Categorical confidence (frequency-based)
                 conf_cat = _conf_cat_from_stats(X.iloc[0], cat_stats_for_conf)
-
-                # Combine with geometric mean
                 hybrid_raw = _hybrid_from_num_cat(conf_num, conf_cat)
 
-                # ปรับสเกลให้อ่านง่ายขึ้นเป็น % และติด label
                 conf_rescaled, conf_label, conf_icon = _rescale_and_label(hybrid_raw, low=0.20, high=0.85)
-
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf_rescaled*100:.1f} %", help=f"Label: {conf_label}")
                 st.info(f"{conf_icon} รายละเอียด: conf_num={conf_num:.3f}, conf_cat={conf_cat:.3f} → geometric mean={hybrid_raw:.3f}")
 
-                with st.expander("รายละเอียดการคำนวณ", expanded=False):
-                    st.write("- **Numeric (quantile-based)**: 1 ในช่วง [P25,P75], ลดเชิงเส้นไป 0.5 ที่ P5/P95, รวมทุกคอลัมน์ด้วย geometric mean")
-                    st.write("- **Categorical (freq-based)**: conf_j=log(1+n+α)/log(1+n_max+α), รวมข้ามคอลัมน์ด้วย geometric mean; α=5")
-                    st.caption("Hybrid = sqrt(conf_num * conf_cat)  → จากนั้นทำ rescale (low=0.20, high=0.85) เพื่อแปลงเป็นสเกลที่อ่านง่ายใน UI")
-                
                 if conf_label == "มั่นใจต่ำ":
                     with st.expander("🔎 ทำไมความมั่นใจต่ำ?", expanded=False):
                         dr = _dimension_drift_report(X_train_all, X, NUM_ONLY_FALLBACK, topn=3)
@@ -612,4 +633,3 @@ if st.button("Predict Price (ล้านบาท)"):
 
     except Exception as e:
         st.error(f"ทำนายไม่สำเร็จ: {e}")
-
