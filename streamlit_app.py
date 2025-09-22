@@ -396,7 +396,7 @@ if isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
 if unseen_cols:
     st.warning(f"⚠️ ค่าใหม่ที่ไม่เคยเจอใน training (หลัง normalize): {', '.join(unseen_cols)}")
 
-# ---------- Predict ----------
+# ---------- Predict ---------- #
 if st.button("Predict Price (ล้านบาท)"):
     try:
         # Predict
@@ -465,3 +465,4 @@ if st.button("Predict Price (ล้านบาท)"):
                 st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence (ใหม่) ได้: {e}")
         else:
             st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
+
