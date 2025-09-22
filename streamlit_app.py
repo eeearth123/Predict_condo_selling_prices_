@@ -32,6 +32,9 @@ PIPELINE_FILE = "pipeline.pkl"
 XTRAIN_FILE   = "X_train.pkl"
 YTRAIN_FILE   = "y_train.pkl"
 
+# หมวดหมู่ที่จะใช้คำนวณความมั่นใจแบบความถี่
+CAT_FOR_CONF = ["Province","District","Subdistrict","Street","Zone","Room_Type_Base"]
+
 # =========================================
 # TwoSegmentRegressor shim (for unpickle)
 # =========================================
@@ -95,9 +98,6 @@ class TwoSegmentRegressor:
 TwoSegmentRegressor.__module__ = "main"
 sys.modules['main'] = sys.modules[__name__]
 
-# ==================
-# ----- Helpers -----
-# ==================
 # ==================
 # ----- Helpers -----
 # ==================
@@ -269,11 +269,11 @@ def _fit_categorical_stats(X_train_all: pd.DataFrame, cat_cols: list, alpha: flo
     เก็บ stats ต่อคอลัมน์: counts, N, K, n_max สำหรับทำความมั่นใจแบบความถี่
     """
     stats = []
+    Xc = X_train_all.copy()
     for c in cat_cols:
-        if c not in X_train_all.columns:
-            vc = pd.Series(dtype=int)
-        else:
-            vc = X_train_all[c].astype(str).str.strip().fillna("").value_counts(dropna=False)
+        if c not in Xc.columns:
+            Xc[c] = ""
+        vc = Xc[c].astype(str).str.strip().fillna("").value_counts(dropna=False)
         counts = vc.to_dict()
         N = int(vc.sum())
         K = int(len(vc))
@@ -347,7 +347,6 @@ except Exception as e:
     y_train_all = None
 
 # Align X/y สำหรับ conformal
-
 def _align_Xy_for_conformal(Xt, y):
     if Xt is None or y is None: return None, None
     y = pd.Series(y)
@@ -364,9 +363,15 @@ Xt_for_conf, y_for_conf = _align_Xy_for_conformal(X_train_all, y_train_all)
 # ==========================
 quantiles_per_num = None
 cat_stats_for_conf = None
+conf_ready = False
 
 try:
     if (X_train_all is not None) and (len(X_train_all) > 0):
+        # เติมคอลัมน์หมวดหมู่ที่ขาดด้วยค่าว่าง
+        for c in CAT_FOR_CONF:
+            if c not in X_train_all.columns:
+                X_train_all[c] = ""
+
         num_cols = _resolve_num_cols(X_train_all)
         quantiles_per_num = _fit_numeric_quantiles(X_train_all, num_cols)
         cat_stats_for_conf = _fit_categorical_stats(X_train_all, CAT_FOR_CONF, alpha=5.0)
@@ -378,11 +383,25 @@ except Exception as e:
     st.sidebar.warning(f"ตั้งค่า Quantile/Freq ไม่สำเร็จ: {e}")
     conf_ready = False
 
+# ---- Debug: แสดงสถานะความพร้อมของสถิติใน sidebar ----
+with st.sidebar.expander("Confidence Stats Debug", expanded=False):
+    st.write("conf_ready:", conf_ready)
+    if X_train_all is None:
+        st.write("X_train_all: None")
+    else:
+        st.write("X_train_all shape:", getattr(X_train_all, "shape", None))
+        st.write("Numeric cols available:", _resolve_num_cols(X_train_all))
+        st.write("Has quantiles_per_num:", quantiles_per_num is not None)
+        st.write("Has cat_stats_for_conf:", cat_stats_for_conf is not None)
+        if quantiles_per_num is not None:
+            st.write("Example quantiles keys:", list(quantiles_per_num.keys())[:3])
+        if cat_stats_for_conf is not None and len(cat_stats_for_conf) > 0:
+            st.write("Example cat col:", cat_stats_for_conf[0]["col"])
+            st.write("Example cat n_max:", cat_stats_for_conf[0]["n_max"])
 
 # ==========================
 # Conformal Calibration
 # ==========================
-
 def _conformal_quantile(residuals: np.ndarray, alpha: float) -> float:
     n = len(residuals)
     if n <= 0: return float("nan")
@@ -491,7 +510,7 @@ room_type_base = st.selectbox("ประเภทห้อง — Room_Type", op
     '3BED_DUPLEX','1BED_LOFT','3BED_TRIPLEX','3BED_PENTHOUSE','4BED_DUPLEX',
     '5BED_DUPLEX','2BED_PLUS','PENTHOUSE_DUPLEX','Pool Access(เชื่อมสระว่ายน้ำ)',
     '5BED','MOFF-Design','25BED','LOFT_OTHER','2BED_PENTHOUSE','SHOP',
-    '1BED_PLUS_LOFT','2BED_LOฟ','Stuio vertiplex','3BED_PLUS','3BED_PLUS_DUPLEX',
+    '1BED_PLUS_LOฟ','2BED_LOฟ','Stuio vertiplex','3BED_PLUS','3BED_PLUS_DUPLEX',
     '3BED_LOFT','4BED_LOFT','DUO','1BED_TRIPLEX','1BED_PLUS_TRIPLEX','2BED_TRIPLEX','Simplex'
 ])
 
@@ -518,7 +537,7 @@ if isinstance(X_train_all, pd.DataFrame) and len(X_train_all) > 0:
 if unseen_cols:
     st.warning(f"⚠️ ค่าใหม่ที่ไม่เคยเจอใน training (หลัง normalize): {', '.join(unseen_cols)}")
 
-# ---------- Predict ---------- #
+# ---------- Predict ----------
 if st.button("Predict Price (ล้านบาท)"):
     try:
         # Predict
@@ -537,7 +556,7 @@ if st.button("Predict Price (ล้านบาท)"):
         except Exception:
             pass
 
-        # Conformal PI (keep same)
+        # Conformal PI
         if conformal_ready and (conformal_info is not None):
             q90, q95 = conformal_info["q90"], conformal_info["q95"]
             pi90 = (max(0.0, pred_val - q90), max(0.0, pred_val + q90))
@@ -552,7 +571,7 @@ if st.button("Predict Price (ล้านบาท)"):
         else:
             st.warning("⚠️ ไม่มีคาลิเบรชันสำหรับ Conformal → ยังไม่แสดงช่วงคาดการณ์ (PI)")
 
-        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====#
+        # ===== Hybrid Confidence (NEW: Quantile numeric + Frequency categorical + Geometric mean) =====
         if conf_ready and (quantiles_per_num is not None) and (cat_stats_for_conf is not None):
             try:
                 num_cols = _resolve_num_cols(X_train_all)
@@ -565,7 +584,7 @@ if st.button("Predict Price (ล้านบาท)"):
                 # Combine with geometric mean
                 hybrid_raw = _hybrid_from_num_cat(conf_num, conf_cat)
 
-                # (ออปชัน) ปรับสเกลให้อ่านง่ายขึ้นเป็น % และติด label
+                # ปรับสเกลให้อ่านง่ายขึ้นเป็น % และติด label
                 conf_rescaled, conf_label, conf_icon = _rescale_and_label(hybrid_raw, low=0.20, high=0.85)
 
                 st.metric("ความมั่นใจของโมเดล (Hybrid Confidence)", f"{conf_rescaled*100:.1f} %", help=f"Label: {conf_label}")
@@ -578,7 +597,7 @@ if st.button("Predict Price (ล้านบาท)"):
                 
                 if conf_label == "มั่นใจต่ำ":
                     with st.expander("🔎 ทำไมความมั่นใจต่ำ?", expanded=False):
-                        dr = _dimension_drift_report(X_train_all, X, NUM_ONLY, topn=3)
+                        dr = _dimension_drift_report(X_train_all, X, NUM_ONLY_FALLBACK, topn=3)
                         if dr:
                             st.table(pd.DataFrame(dr, columns=["Column","|z|","Input value"]))
                         if unseen_cols:
@@ -587,7 +606,6 @@ if st.button("Predict Price (ล้านบาท)"):
                 st.warning(f"ไม่สามารถคำนวณ Hybrid Confidence (ใหม่) ได้: {e}")
         else:
             st.warning("⚠️ ข้อมูลสถิติไม่พร้อม — ยังไม่แสดง Hybrid Confidence (ใหม่)")
-    except Exception as e:st.error(f"ทำนายไม่สำเร็จ: {e}")
 
-
-
+    except Exception as e:
+        st.error(f"ทำนายไม่สำเร็จ: {e}")
